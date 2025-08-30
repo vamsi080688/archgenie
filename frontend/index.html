@@ -1,41 +1,45 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Welcome to ArchGenie</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: Arial, sans-serif;
-      background: linear-gradient(to right, #4facfe, #00f2fe);
-      color: #fff;
-      text-align: center;
-      height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      flex-direction: column;
-    }
-    h1 {
-      font-size: 3rem;
-      margin-bottom: 10px;
-    }
-    p {
-      font-size: 1.2rem;
-      margin-top: 0;
-    }
-    .footer {
-      position: absolute;
-      bottom: 15px;
-      font-size: 0.9rem;
-      color: #eee;
-    }
-  </style>
-</head>
-<body>
-  <h1>Welcome to ArchGenie 🚀</h1>
-  <p>WebSite in Progress</p>
-  <div class="footer">© 2025 ArchGenie</div>
-</body>
+  <head>
+    <meta charset="utf-8">
+    <title>ArchGenie</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      body {
+        font-family: system-ui, Arial, sans-serif;
+        margin: 40px;
+        background: #f9fafb;
+        color: #111827;
+        text-align: center;
+      }
+      header {
+        margin-bottom: 40px;
+      }
+      img.logo {
+        height: 80px;
+        margin-bottom: 10px;
+      }
+      h1 {
+        font-size: 2rem;
+        margin: 0;
+        color: #2563eb; /* blue accent */
+      }
+      p {
+        font-size: 1rem;
+        color: #374151;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <img src="logo.png" alt="ArchGenie Logo" class="logo" />
+      <h1>Welcome to ArchGenie</h1>
+      <p>AI-powered Architecture Generator</p>
+    </header>
+
+    <main>
+      <p>Website in progress</p>
+      <p>Frontend is served by Nginx, backend is proxied at <code>/api</code>.</p>
+    </main>
+  </body>
 </html>
