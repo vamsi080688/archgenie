@@ -13,130 +13,183 @@ permissions:
   contents: read
 
 env:
-  RG_NAME: "RG-EUS-AG-DEV-01"                  
-  VM_NAME: "SEUSAGLNDEV01"           
-  STORAGE_ACCOUNT: "steusag01"  
-  CONTAINER: "releases"             
-  FRONTEND_PATH: "frontend"         
-  BACKEND_PATH: "backend"           
+  RG_NAME: "RG-EUS-AG-DEV-01"
+  VM_NAME: "SEUSAGLNDEV01"
+  STORAGE_ACCOUNT: "steusag01"
+  CONTAINER: "releases"
+  FRONTEND_PATH: "frontend"
+  BACKEND_PATH: "backend"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    # ---------- Resolve VERSION ----------
-    - name: Compute VERSION
-      id: ver
-      shell: bash
-      run: |
-        set -e
-        INPUT_VER="${{ github.event.inputs.version }}"
-        if [ -n "$INPUT_VER" ]; then
-          VERSION="$INPUT_VER"
-        elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-          VERSION="${GITHUB_REF_NAME}"
-        elif [ -f "${{ env.FRONTEND_PATH }}/package.json" ]; then
-          if command -v jq >/dev/null 2>&1; then
-            VERSION="$(jq -r '.version' "${{ env.FRONTEND_PATH }}/package.json")"
-          else
-            VERSION="$(grep -m1 '"version"' "${{ env.FRONTEND_PATH }}/package.json" | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
-          fi
-        else
-          VERSION="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
-        fi
-        SAFE_VERSION="$(echo "$VERSION" | tr '/ ' '-' | sed -E 's/[^A-Za-z0-9._-]/-/g')"
-        echo "VERSION=$SAFE_VERSION" >> $GITHUB_OUTPUT
-        echo "ARTIFACT=archgenie-$SAFE_VERSION" >> $GITHUB_OUTPUT
-
-    # ---------- Build frontend ----------
-    - name: Setup Node
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
-    - name: Build frontend (React/MermaidJS)
-      working-directory: ${{ env.FRONTEND_PATH }}
-      run: |
-        npm ci
-        npm run build
-
-    # ---------- Package FE + BE ----------
-    - name: Create deployment bundle
-      run: |
-        tar -czf "${{ steps.ver.outputs.ARTIFACT }}.tar.gz" \
-          -C "${{ env.FRONTEND_PATH }}" build \
-          "${{ env.BACKEND_PATH }}"
-
-    # ---------- Azure login via OIDC ----------
-    - name: Azure login (OIDC)
-      uses: azure/login@v2
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    # ---------- Upload + SAS ----------
-    - name: Upload artifact & generate SAS
-      id: upload
-      shell: bash
-      run: |
-        set -e
-        az storage container create \
-          --name "${{ env.CONTAINER }}" \
-          --account-name "${{ env.STORAGE_ACCOUNT }}" \
-          --auth-mode login >/dev/null
-        az storage blob upload \
-          --account-name "${{ env.STORAGE_ACCOUNT }}" \
-          --container-name "${{ env.CONTAINER }}" \
-          --name "${{ steps.ver.outputs.ARTIFACT }}.tar.gz" \
-          --file "${{ steps.ver.outputs.ARTIFACT }}.tar.gz" \
-          --auth-mode login \
-          --overwrite
-        EXPIRY=$(date -u -d "+2 hours" '+%Y-%m-%dT%H%MZ')
-        SAS=$(az storage blob generate-sas \
-              --as-user \
-              --auth-mode login \
-              --account-name "${{ env.STORAGE_ACCOUNT }}" \
-              --container-name "${{ env.CONTAINER }}" \
-              --name "${{ steps.ver.outputs.ARTIFACT }}.tar.gz" \
-              --permissions r \
-              --expiry "$EXPIRY" \
-              --output tsv)
-        echo "BLOB_URL=https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net/${{ env.CONTAINER }}/${{ steps.ver.outputs.ARTIFACT }}.tar.gz" >> $GITHUB_OUTPUT
-        echo "BLOB_SAS=?$SAS" >> $GITHUB_OUTPUT
-
-    # ---------- Deploy on VM ----------
-    - name: Deploy inside VM (Run Command)
-      shell: bash
-      run: |
-        set -e
-        az vm run-command invoke \
-          --resource-group "${{ env.RG_NAME }}" \
-          --name "${{ env.VM_NAME }}" \
-          --command-id RunShellScript \
-          --scripts "
-            set -e
-
-            VERSION='${{ steps.ver.outputs.VERSION }}'
-            ARTIFACT='${{ steps.ver.outputs.ARTIFACT }}'
-            RELROOT=/opt/archgenie-backend_releases
-            REL=\$RELROOT/\$VERSION
-
-            # Download bundle
-            mkdir -p /tmp/archgenie
-            if command -v azcopy >/dev/null 2>&1; then
-              azcopy copy '${{ steps.upload.outputs.BLOB_URL }}${{ steps.upload.outputs.BLOB_SAS }}' \"/tmp/archgenie/\$ARTIFACT.tar.gz\"
+      # ---------- Resolve VERSION ----------
+      - name: Compute VERSION
+        id: ver
+        shell: bash
+        run: |
+          set -e
+          INPUT_VER="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT_VER" ]; then
+            VERSION="$INPUT_VER"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          elif [ -f "${{ env.FRONTEND_PATH }}/package.json" ]; then
+            if command -v jq >/dev/null 2>&1; then
+              VERSION="$(jq -r '.version' '${{ env.FRONTEND_PATH }}/package.json')"
             else
-              curl -fSL '${{ steps.upload.outputs.BLOB_URL }}${{ steps.upload.outputs.BLOB_SAS }}' -o \"/tmp/archgenie/\$ARTIFACT.tar.gz\"
+              VERSION="$(grep -m1 '"version"' '${{ env.FRONTEND_PATH }}/package.json' | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
             fi
+          else
+            VERSION="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          fi
+          SAFE_VERSION="$(echo "$VERSION" | tr '/ ' '-' | sed -E 's/[^A-Za-z0-9._-]/-/g')"
+          echo "VERSION=$SAFE_VERSION" >> $GITHUB_OUTPUT
+          echo "ARTIFACT=archgenie-$SAFE_VERSION" >> $GITHUB_OUTPUT
 
-            # Unpack
-            rm -rf /tmp/archgenie/unpacked && mkdir -p /tmp/archgenie/unpacked
-            tar -xzf \"/tmp/archgenie/\$ARTIFACT.tar.gz\" -C /tmp/archgenie/unpacked
+      # ---------- Build frontend (skip if no package.json) ----------
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-            # FRONTEND
-            sudo mkdir -p /var/www/archgenie-frontend
+      - name: Build frontend
+        shell: bash
+        run: |
+          if [ -f "${{ env.FRONTEND_PATH }}/package.json" ]; then
+            cd "${{ env.FRONTEND_PATH }}"
+            npm ci
+            npm run build
+            cd -
+          else
+            echo "No package.json in ${{ env.FRONTEND_PATH }}. Skipping FE build and deploying raw folder."
+          fi
+
+      # ---------- Package FE + BE ----------
+      - name: Create deployment bundle
+        shell: bash
+        run: |
+          set -e
+          ART="${{ steps.ver.outputs.ARTIFACT }}.tar.gz"
+          rm -f "$ART"
+          if [ -d "${{ env.FRONTEND_PATH }}/build" ]; then
+            # include frontend/build and backend/
+            tar -czf "$ART" -C "${{ env.FRONTEND_PATH }}" build "${{ env.BACKEND_PATH }}"
+          else
+            # include raw frontend/ and backend/
+            tar -czf "$ART" "${{ env.FRONTEND_PATH }}" "${{ env.BACKEND_PATH }}"
+          fi
+          ls -lh "$ART"
+
+      # ---------- Azure login via OIDC ----------
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ---------- Upload to Storage & generate SAS ----------
+      - name: Upload artifact & generate SAS
+        id: upload
+        shell: bash
+        run: |
+          set -e
+          ART="${{ steps.ver.outputs.ARTIFACT }}.tar.gz"
+          az storage container create \
+            --name "${{ env.CONTAINER }}" \
+            --account-name "${{ env.STORAGE_ACCOUNT }}" \
+            --auth-mode login >/dev/null
+
+          az storage blob upload \
+            --account-name "${{ env.STORAGE_ACCOUNT }}" \
+            --container-name "${{ env.CONTAINER }}" \
+            --name "$ART" \
+            --file "$ART" \
+            --auth-mode login \
+            --overwrite
+
+          EXPIRY=$(date -u -d "+2 hours" '+%Y-%m-%dT%H:%MZ')
+          SAS=$(az storage blob generate-sas \
+                --as-user \
+                --auth-mode login \
+                --account-name "${{ env.STORAGE_ACCOUNT }}" \
+                --container-name "${{ env.CONTAINER }}" \
+                --name "$ART" \
+                --permissions r \
+                --expiry "$EXPIRY" \
+                --output tsv)
+
+          echo "BLOB_URL=https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net/${{ env.CONTAINER }}/$ART" >> $GITHUB_OUTPUT
+          echo "BLOB_SAS=?$SAS" >> $GITHUB_OUTPUT
+
+      # ---------- Deploy on VM (Run Command) ----------
+      - name: Deploy inside VM (Run Command)
+        shell: bash
+        run: |
+          set -e
+          az vm run-command invoke \
+            --resource-group "${{ env.RG_NAME }}" \
+            --name "${{ env.VM_NAME }}" \
+            --command-id RunShellScript \
+            --scripts "
+              set -e
+
+              VERSION='${{ steps.ver.outputs.VERSION }}'
+              ARTIFACT='${{ steps.ver.outputs.ARTIFACT }}'
+              BLOB='${{ steps.upload.outputs.BLOB_URL }}${{ steps.upload.outputs.BLOB_SAS }}'
+
+              FE_ROOT=/var/www/archgenie
+              RELROOT=/opt/archgenie/releases
+              CURRENT=/opt/archgenie/current
+
+              # Ensure base folders exist
+              sudo mkdir -p \"\$FE_ROOT\" \"\$RELROOT\"
+
+              # Download bundle to /tmp
+              mkdir -p /tmp/archgenie
+              if command -v azcopy >/dev/null 2>&1; then
+                azcopy copy \"\$BLOB\" \"/tmp/archgenie/\$ARTIFACT.tar.gz\"
+              else
+                curl -fSL \"\$BLOB\" -o \"/tmp/archgenie/\$ARTIFACT.tar.gz\"
+              fi
+
+              # Unpack
+              rm -rf /tmp/archgenie/unpacked && mkdir -p /tmp/archgenie/unpacked
+              tar -xzf \"/tmp/archgenie/\$ARTIFACT.tar.gz\" -C /tmp/archgenie/unpacked
+
+              # ---- FRONTEND ----
+              if [ -d /tmp/archgenie/unpacked/build ]; then
+                sudo rm -rf \"\$FE_ROOT\"/*
+                sudo cp -r /tmp/archgenie/unpacked/build/* \"\$FE_ROOT\"/
+              else
+                # copy raw frontend folder if no build dir
+                sudo rm -rf \"\$FE_ROOT\"/*
+                sudo cp -r /tmp/archgenie/unpacked/${{ env.FRONTEND_PATH }}/* \"\$FE_ROOT\"/ 2>/dev/null || true
+              fi
+              sudo chown -R www-data:www-data \"\$FE_ROOT\"
+
+              # ---- BACKEND (blue/green) ----
+              REL=\"\$RELROOT/\$VERSION\"
+              sudo mkdir -p \"\$REL\"
+              sudo rsync -a --delete /tmp/archgenie/unpacked/${{ env.BACKEND_PATH }}/ \"\$REL\"/
+
+              # Activate release
+              sudo ln -sfn \"\$REL\" \"\$CURRENT\"
+
+              # Python deps (skip if not Python)
+              if command -v python3 >/dev/null 2>&1; then
+                cd \"\$CURRENT\"
+                python3 -m venv .venv
+                . .venv/bin/activate
+                if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+              fi
+
+              # Restart services
+              sudo systemctl restart archgenie-backend || true
+              sudo systemctl restart nginx || true
+            "
