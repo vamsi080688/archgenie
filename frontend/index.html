@@ -11,41 +11,44 @@
         padding: 0;
         height: 100vh;
         display: flex;
+        flex-direction: column;
         justify-content: center;
         align-items: center;
         text-align: center;
-        color: #1e293b; /* slate-800 */
-        background: linear-gradient(135deg, #e0f2f1, #e3f2fd);
-      }
-      .container {
-        background: rgba(255, 255, 255, 0.85);
-        padding: 50px;
-        border-radius: 16px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+        color: #f9fafb; /* light text */
+        background: linear-gradient(135deg, #dbeafe, #60a5fa, #2563eb);
+        /* light blue → medium sky blue → deep blue */
       }
       img.logo {
-        height: 140px; /* increased from 80px */
-        margin-bottom: 20px;
+        height: 200px; /* big logo */
+        margin-bottom: 30px;
       }
       h1 {
-        font-size: 2.2rem;
+        font-size: 2.6rem;
         margin: 0;
-        color: #2563eb; /* blue-600 */
+        color: #ffffff; /* pure white */
       }
       p {
         margin: 10px 0;
-        font-size: 1.05rem;
-        color: #475569; /* slate-600 */
+        font-size: 1.2rem;
+        color: #e0f2fe; /* very light blue text */
+      }
+      em {
+        color: #bfdbfe; /* subtle light-blue gray */
+      }
+      code {
+        background: rgba(255,255,255,0.2);
+        padding: 2px 6px;
+        border-radius: 4px;
+        color: #fff;
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <img src="logo.png" alt="ArchGenie Logo" class="logo" />
-      <h1>Welcome to ArchGenie</h1>
-      <p>AI-powered Architecture Generator</p>
-      <p><em>Website in progress</em></p>
-      <p>Frontend is served by Nginx, backend is proxied at <code>/api</code>.</p>
-    </div>
+    <img src="logo.png" alt="ArchGenie Logo" class="logo" />
+    <h1>Welcome to ArchGenie</h1>
+    <p>AI-powered Architecture Generator</p>
+    <p><em>Website in progress</em></p>
+    <p>Frontend is served by Nginx, backend is proxied at <code>/api</code>.</p>
   </body>
 </html>
