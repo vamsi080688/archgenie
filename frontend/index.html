@@ -7,39 +7,45 @@
     <style>
       body {
         font-family: system-ui, Arial, sans-serif;
-        margin: 40px;
-        background: #f9fafb;
-        color: #111827;
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
         text-align: center;
+        color: #1e293b; /* slate-800 */
+        background: linear-gradient(135deg, #e0f2f1, #e3f2fd);
       }
-      header {
-        margin-bottom: 40px;
+      .container {
+        background: rgba(255, 255, 255, 0.85);
+        padding: 50px;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.1);
       }
       img.logo {
-        height: 80px;
-        margin-bottom: 10px;
+        height: 140px; /* increased from 80px */
+        margin-bottom: 20px;
       }
       h1 {
-        font-size: 2rem;
+        font-size: 2.2rem;
         margin: 0;
-        color: #2563eb; /* blue accent */
+        color: #2563eb; /* blue-600 */
       }
       p {
-        font-size: 1rem;
-        color: #374151;
+        margin: 10px 0;
+        font-size: 1.05rem;
+        color: #475569; /* slate-600 */
       }
     </style>
   </head>
   <body>
-    <header>
+    <div class="container">
       <img src="logo.png" alt="ArchGenie Logo" class="logo" />
       <h1>Welcome to ArchGenie</h1>
       <p>AI-powered Architecture Generator</p>
-    </header>
-
-    <main>
-      <p>Website in progress</p>
+      <p><em>Website in progress</em></p>
       <p>Frontend is served by Nginx, backend is proxied at <code>/api</code>.</p>
-    </main>
+    </div>
   </body>
 </html>
