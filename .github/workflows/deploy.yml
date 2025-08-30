@@ -1,22 +1,31 @@
----
+name: Test Azure OIDC Connectivity
+
+on:
+  workflow_dispatch:   # run manually from the Actions tab
+  push:
+    branches:
+      - main           # optional: also test on push to main
+
 permissions:
-  id-token: write
+  id-token: write      # required for OIDC
   contents: read
+
 jobs:
-  build-and-deploy:
+  test-connectivity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Deploy using Run Command
-        run: |
-          az vm run-command invoke \
-            --resource-group myRG \
-            --name myVM \
-            --command-id RunShellScript \
-            --scripts "echo hello from OIDC"
+
+      - name: Show Azure account
+        run: az account show
+
+      - name: List resource groups
+        run: az group list -o table
