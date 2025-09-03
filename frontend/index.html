@@ -3,8 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>ArchGenie</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Mermaid (for diagrams) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -25,12 +24,12 @@
           </div>
           <div class="col">
             <label for="appName">App / Use case</label>
-            <input id="appName" type="text" placeholder="e.g., secure Azure 3-tier web app" />
+            <input id="appName" type="text" placeholder="secure Azure 3-tier web app" />
           </div>
         </div>
 
         <label for="prompt">Custom prompt (optional)</label>
-        <textarea id="prompt" rows="5" placeholder="Describe constraints, regions, SKUs, compliance needs, etc."></textarea>
+        <textarea id="prompt" rows="5" placeholder="constraints, regions, SKUs, compliance..."></textarea>
 
         <div class="btnrow">
           <button id="btnAzure">Generate with Azure MCP</button>
@@ -42,8 +41,24 @@
 
       <section class="grid">
         <div class="card">
-          <h3>Architecture Diagram</h3>
-          <div id="diagram" class="diagram"></div>
+          <div class="card-head">
+            <h3>Architecture Diagram</h3>
+            <div class="tools">
+              <select id="zoom">
+                <option value="fit">Fit</option>
+                <option value="1">100%</option>
+                <option value="1.5">150%</option>
+                <option value="2">200%</option>
+              </select>
+              <button id="dlSvg" class="ghost">Download SVG</button>
+              <button id="dlPng" class="ghost">Download PNG</button>
+            </div>
+          </div>
+
+          <div id="diagramWrap">
+            <div id="diagram" class="diagram"></div>
+          </div>
+
           <details class="raw">
             <summary>Show diagram source</summary>
             <pre id="diagramSrc"></pre>
@@ -61,10 +76,7 @@
       </section>
     </main>
 
-    <footer>
-      <small>© ArchGenie • Demo UI</small>
-    </footer>
-
+    <footer><small>© ArchGenie • Demo UI</small></footer>
     <script defer src="app.js"></script>
   </body>
 </html>
