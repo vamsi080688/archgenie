@@ -1,54 +1,70 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
+    <meta charset="utf-8" />
     <title>ArchGenie</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-      body {
-        font-family: system-ui, Arial, sans-serif;
-        margin: 0;
-        padding: 0;
-        height: 100vh;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        text-align: center;
-        color: #f9fafb; /* light text */
-        background: linear-gradient(135deg, #dbeafe, #60a5fa, #2563eb);
-        /* light blue → medium sky blue → deep blue */
-      }
-      img.logo {
-        height: 200px; /* big logo */
-        margin-bottom: 30px;
-      }
-      h1 {
-        font-size: 2.6rem;
-        margin: 0;
-        color: #ffffff; /* pure white */
-      }
-      p {
-        margin: 10px 0;
-        font-size: 1.2rem;
-        color: #e0f2fe; /* very light blue text */
-      }
-      em {
-        color: #bfdbfe; /* subtle light-blue gray */
-      }
-      code {
-        background: rgba(255,255,255,0.2);
-        padding: 2px 6px;
-        border-radius: 4px;
-        color: #fff;
-      }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Mermaid (for diagrams) -->
+    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <img src="logo.png" alt="ArchGenie Logo" class="logo" />
-    <h1>Welcome to ArchGenie</h1>
-    <p>AI-powered Architecture Generator</p>
-    <p><em>Website in progress</em></p>
-    <p>Frontend is served by Nginx, backend is proxied at <code>/api</code>.</p>
+    <header>
+      <img src="logo.png" alt="ArchGenie Logo" class="logo" />
+      <h1>ArchGenie</h1>
+      <p>AI-powered Architecture Generator</p>
+      <p class="subtitle">Frontend served by Nginx, backend proxied at <code>/api</code>.</p>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <div class="row">
+          <div class="col">
+            <label for="apiKey">API Key (x-api-key)</label>
+            <input id="apiKey" type="password" placeholder="CAL_API_KEY" />
+          </div>
+          <div class="col">
+            <label for="appName">App / Use case</label>
+            <input id="appName" type="text" placeholder="e.g., secure Azure 3-tier web app" />
+          </div>
+        </div>
+
+        <label for="prompt">Custom prompt (optional)</label>
+        <textarea id="prompt" rows="5" placeholder="Describe constraints, regions, SKUs, compliance needs, etc."></textarea>
+
+        <div class="btnrow">
+          <button id="btnAzure">Generate with Azure MCP</button>
+          <button id="btnAWS" class="ghost">Mock AWS</button>
+          <button id="btnGCP" class="ghost">Mock GCP</button>
+          <span id="status"></span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h3>Architecture Diagram</h3>
+          <div id="diagram" class="diagram"></div>
+          <details class="raw">
+            <summary>Show diagram source</summary>
+            <pre id="diagramSrc"></pre>
+          </details>
+        </div>
+
+        <div class="card">
+          <h3>Terraform</h3>
+          <pre id="tf" class="code"></pre>
+          <div class="btnrow">
+            <button id="copyTf">Copy Terraform</button>
+            <a id="downloadTf" download="archgenie.tf" class="ghost">Download .tf</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <small>© ArchGenie • Demo UI</small>
+    </footer>
+
+    <script defer src="app.js"></script>
   </body>
 </html>
