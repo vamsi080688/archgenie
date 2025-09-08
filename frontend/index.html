@@ -73,6 +73,26 @@
             <a id="downloadTf" download="archgenie.tf" class="ghost">Download .tf</a>
           </div>
         </div>
+
+        <div class="card">
+          <h3>Estimated Cost</h3>
+          <div id="costSummary" class="muted">Run Azure MCP or paste items to estimate.</div>
+          <table id="costTable" class="cost hidden">
+            <thead>
+              <tr>
+                <th>Cloud</th><th>Service</th><th>SKU</th><th>Qty</th><th>Region</th><th>Unit/mo</th><th>Monthly</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+            <tfoot>
+              <tr><td colspan="6" class="right">Total</td><td id="costTotal"></td></tr>
+            </tfoot>
+          </table>
+          <details class="raw" id="costNotesWrap" style="margin-top:8px; display:none;">
+            <summary>Notes</summary>
+            <ul id="costNotes"></ul>
+          </details>
+        </div>
       </section>
     </main>
 

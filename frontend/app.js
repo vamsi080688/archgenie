@@ -1,7 +1,7 @@
 /* global mermaid */
 const $ = (id) => document.getElementById(id);
 const apiBase = "/api"; // nginx proxies /api -> 127.0.0.1:8000
-let lastSVG = "";       // store rendered SVG for downloads
+let lastSVG = "";
 let currentScale = "fit";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });
@@ -48,7 +48,7 @@ function cleanFence(s){
     const re = new RegExp("^```"+lang+"\\s*\\n([\\s\\S]*?)```\\s*$","i");
     const m = s.match(re); if(m) return m[1].trim();
   }
-  const generic = s.match(/^```[\s\S]*?\n([\s\\S]*?)```$/);
+  const generic = s.match(/^```[\s\S]*?\n([\s\S]*?)```$/);
   return generic ? generic[1].trim() : s;
 }
 
@@ -67,14 +67,40 @@ async function runAzure(){
     });
     if(!res.ok) throw new Error(await res.text());
     const data = await res.json();
+
     const diagram = cleanFence(data.diagram || "");
     const tf = cleanFence(data.terraform || "");
     renderDiagram(diagram);
     showTF(tf);
+
+    // Show cost if present; if not, call /estimate with diagram/terraform
+    if (data.cost) {
+      renderCost(data.cost);
+    } else {
+      await estimateCost({ diagram, terraform: tf });
+    }
+
     flash("Azure MCP response ready", "ok");
   }catch(e){
     console.error(e);
     flash(`Azure MCP error: ${e.message}`, "err");
+  }
+}
+
+async function estimateCost({ items, diagram, terraform, region }){
+  const key = $("apiKey").value.trim();
+  try{
+    const res = await fetch(`${apiBase}/estimate`, {
+      method:"POST",
+      headers: {"Content-Type":"application/json", "x-api-key": key},
+      body: JSON.stringify({ items, diagram, terraform, region })
+    });
+    if(!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderCost(data.estimate);
+  }catch(e){
+    console.error(e);
+    flash(`Cost estimate error: ${e.message}`, "err");
   }
 }
 
@@ -86,8 +112,12 @@ async function runMock(which){
     const res = await fetch(`${apiBase}/mcp/${which}/diagram-tf`, { headers: {"x-api-key": key} });
     if(!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    renderDiagram(cleanFence(data.diagram||""));
-    showTF(cleanFence(data.terraform||""));
+    const diagram = cleanFence(data.diagram||"");
+    const tf = cleanFence(data.terraform||"");
+    renderDiagram(diagram);
+    showTF(tf);
+    // No live costing for AWS/GCP mocks; clear the cost table
+    renderCost(null);
     flash(`${which.toUpperCase()} mock ready`, "ok");
   }catch(e){
     console.error(e);
@@ -106,9 +136,7 @@ function renderDiagram(src){
 
   const id = "mmd-" + Math.random().toString(36).slice(2);
   mermaid.render(id, src).then(({svg}) => {
-    // make SVG responsive
-    const responsive = svg.replace(/width="[^"]+"/, 'width="100%"')
-                          .replace(/height="[^"]+"/, '');
+    const responsive = svg.replace(/width="[^"]+"/, 'width="100%"').replace(/height="[^"]+"/, '');
     container.innerHTML = responsive;
     lastSVG = container.querySelector("svg")?.outerHTML || "";
     applyZoom();
@@ -123,21 +151,14 @@ function applyZoom(){
   const wrap = $("diagramWrap");
   const z = $("zoom").value;
   currentScale = z;
-
-  // Reset sizing
   svg.style.transformOrigin = "top left";
   svg.style.transform = "";
-
   if(z === "fit"){
-    // fit width of wrapper, let height scroll
     svg.style.width = "100%";
-    svg.style.transform = "";
   } else {
-    // scale by factor
     const factor = parseFloat(z) || 1;
-    svg.style.width = ""; // let intrinsic width
+    svg.style.width = "";
     svg.style.transform = `scale(${factor})`;
-    // keep scrollbars usable
     wrap.scrollTop = 0; wrap.scrollLeft = 0;
   }
 }
@@ -152,7 +173,6 @@ function downloadSVG(){
 
 function downloadPNG(){
   if(!lastSVG){ flash("No diagram to download", "err"); return; }
-  // draw SVG to canvas then to PNG
   const img = new Image();
   const svgBlob = new Blob([lastSVG], {type: "image/svg+xml;charset=utf-8"});
   const url = URL.createObjectURL(svgBlob);
@@ -163,7 +183,7 @@ function downloadPNG(){
     canvas.width = Math.max(1, Math.floor(w));
     canvas.height = Math.max(1, Math.floor(h));
     const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#0b1221"; // page bg
+    ctx.fillStyle = "#0b1221";
     ctx.fillRect(0,0,canvas.width,canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     URL.revokeObjectURL(url);
@@ -172,6 +192,9 @@ function downloadPNG(){
   img.onerror = () => { URL.revokeObjectURL(url); flash("PNG render failed", "err"); };
   img.src = url;
 }
+
+$("dlSvg").addEventListener("click", downloadSVG);
+$("dlPng").addEventListener("click", downloadPNG);
 
 function triggerDownload(blob, filename){
   const a = document.createElement("a");
@@ -185,4 +208,71 @@ function triggerDownload(blob, filename){
   });
 }
 
-function escapeHtml(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function renderCost(estimate){
+  const table = $("costTable");
+  const tbody = table.querySelector("tbody");
+  const totalEl = $("costTotal");
+  const sum = $("costSummary");
+  const notesWrap = $("costNotesWrap");
+  const notesList = $("costNotes");
+
+  tbody.innerHTML = "";
+  notesList.innerHTML = "";
+
+  if(!estimate){
+    sum.textContent = "No cost estimate available for this cloud.";
+    table.classList.add("hidden");
+    notesWrap.style.display = "none";
+    return;
+  }
+
+  const { currency, total_estimate, items = [], notes = [] } = estimate;
+  if (items.length === 0){
+    sum.textContent = "No billable items detected.";
+    table.classList.add("hidden");
+    notesWrap.style.display = notes.length ? "block" : "none";
+    notes.forEach(n => {
+      const li = document.createElement("li");
+      li.textContent = n;
+      notesList.appendChild(li);
+    });
+    return;
+  }
+
+  items.forEach(it => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(it.cloud || "")}</td>
+      <td>${escapeHtml(it.service || "")}</td>
+      <td>${escapeHtml(it.sku || "")}</td>
+      <td>${Number(it.qty || 0)}</td>
+      <td>${escapeHtml(it.region || "")}</td>
+      <td>${fmtMoney(it.unit_monthly, currency)}</td>
+      <td>${fmtMoney(it.monthly, currency)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  totalEl.textContent = fmtMoney(total_estimate, currency);
+  sum.textContent = `Estimated monthly total: ${fmtMoney(total_estimate, currency)} (${estimate.method})`;
+  table.classList.remove("hidden");
+
+  if (notes && notes.length){
+    notesWrap.style.display = "block";
+    notes.forEach(n => {
+      const li = document.createElement("li");
+      li.textContent = n;
+      notesList.appendChild(li);
+    });
+  } else {
+    notesWrap.style.display = "none";
+  }
+}
+
+function fmtMoney(v, currency="USD"){
+  if (v === null || v === undefined) return "-";
+  try { return new Intl.NumberFormat(undefined, {style:"currency", currency}).format(Number(v)); }
+  catch { return `$${Number(v).toFixed(2)}`; }
+}
+
+function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }

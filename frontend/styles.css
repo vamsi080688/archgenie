@@ -41,12 +41,18 @@ button#btnAzure{border-color:#2563eb;background:linear-gradient(180deg,#1d4ed8,#
 button#copyTf{border-color:#16a34a}
 
 #diagramWrap{
-  width:100%; height:65vh; /* << bigger diagram area */
+  width:100%; height:65vh;
   border:1px dashed var(--border); border-radius:12px; background:#0b1221;
-  overflow:auto; /* allow panning by scrollbars */
+  overflow:auto;
 }
 .diagram{min-width:100%; min-height:100%; padding:12px}
 
-/* Mermaid source & TF panes */
 pre.code,.raw pre{background:#0b1221;padding:12px;border-radius:10px;border:1px solid var(--border);overflow:auto}
 footer{text-align:center;color:var(--muted);padding:16px}
+
+table.cost{width:100%;border-collapse:collapse;margin-top:8px}
+table.cost th, table.cost td{border:1px solid var(--border);padding:8px}
+table.cost th{background:#0f172a}
+.right{text-align:right}
+.muted{color:var(--muted)}
+.hidden{display:none}
