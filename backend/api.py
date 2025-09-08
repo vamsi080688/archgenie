@@ -20,11 +20,11 @@ AZURE_OPENAI_API_KEY     = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
-# Pricing: use live Azure Retail Prices API when possible (no Azure account needed)
+# Pricing: use live Azure Retail Prices API (no Azure subscription needed)
 USE_LIVE_AZURE_PRICES = os.getenv("USE_LIVE_AZURE_PRICES", "true").lower() == "true"
 HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
 
-# Default region rule (per your request): if user gives none → use eastus
+# Default region rule: if user does not provide region, use eastus
 DEFAULT_REGION = os.getenv("DEFAULT_REGION", "eastus")
 
 # =========================
@@ -37,7 +37,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="4.1.0")
+app = FastAPI(title="ArchGenie Backend", version="4.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -163,7 +163,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     if "application insights" in blob or "monitor" in blob or "log analytics" in blob:
         add("azure", "monitor", "LogAnalytics", qty=1)
 
-    # If AOAI configured and 'ask' present, ask it to normalize too
+    # If AOAI configured and 'ask' present, let it normalize too
     if ask.strip() and _aoai_configured():
         try:
             system = (
@@ -184,7 +184,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             pass
 
     # Merge duplicates
-    merged: Dict[Tuple[str,str,str,str], dict] = {}
+    merged: Dict[Tuple[str, str, str, str], dict] = {}
     for it in items:
         k = (it["cloud"], it["service"], it["sku"], it["region"])
         if k not in merged:
@@ -202,7 +202,8 @@ _price_cache: Dict[str, Tuple[float, float]] = {}  # key -> (price, expires_at)
 
 def cache_get(key: str) -> Optional[float]:
     v = _price_cache.get(key)
-    if not v: return None
+    if not v:
+        return None
     price, exp = v
     return price if exp > time.time() else None
 
@@ -230,10 +231,12 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'App Service' and skuName eq '{sku}' and armRegionName eq '{region}'"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -241,7 +244,8 @@ def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
 def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
     key = f"az.vm.{region}.{size}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     candidates = [size, size.replace("_", " "), size.replace("v", " v")]
     for sku in candidates:
         f = f"serviceName eq 'Virtual Machines' and skuName eq '{sku}' and armRegionName eq '{region}'"
@@ -255,10 +259,12 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{region}'"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -266,10 +272,12 @@ def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
 def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     key = f"az.storage.lrs.{region}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'Storage' and armRegionName eq '{region}' and contains(skuName, 'LRS')"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     price = monthly_from_retail(item)  # usually per-GB per-month
     cache_put(key, price)
     return price
@@ -277,10 +285,12 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
 def azure_price_for_lb(region: str) -> Optional[float]:
     key = f"az.lb.standard.{region}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'Load Balancer' and armRegionName eq '{region}' and contains(skuName, 'Standard')"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -288,10 +298,12 @@ def azure_price_for_lb(region: str) -> Optional[float]:
 def azure_price_for_appgw_wafv2(region: str) -> Optional[float]:
     key = f"az.appgw.wafv2.{region}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'Application Gateway' and armRegionName eq '{region}' and contains(skuName, 'WAF_v2')"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -299,10 +311,12 @@ def azure_price_for_appgw_wafv2(region: str) -> Optional[float]:
 def azure_price_for_redis(sku: str, region: str) -> Optional[float]:
     key = f"az.redis.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'Azure Cache for Redis' and skuName eq '{sku}' and armRegionName eq '{region}'"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -310,10 +324,12 @@ def azure_price_for_redis(sku: str, region: str) -> Optional[float]:
 def azure_price_for_log_analytics(region: str) -> Optional[float]:
     key = f"az.loganalytics.{region}"
     c = cache_get(key)
-    if c is not None: return c
+    if c is not None:
+        return c
     f = f"serviceName eq 'Log Analytics' and armRegionName eq '{region}'"
     item = azure_price_query(f)
-    if not item: return None
+    if not item:
+        return None
     monthly = monthly_from_retail(item)
     cache_put(key, monthly)
     return monthly
@@ -328,9 +344,9 @@ def price_items(items: List[dict]) -> dict:
     out_items = []
 
     for it in items:
-        cloud   = it.get("cloud","").lower()
-        service = it.get("service","").lower()
-        sku     = it.get("sku","")
+        cloud   = it.get("cloud", "").lower()
+        service = it.get("service", "").lower()
+        sku     = it.get("sku", "")
         qty     = int(it.get("qty", 1) or 1)
         region  = it.get("region") or DEFAULT_REGION
         size_gb = float(it.get("size_gb", 0) or 0)
@@ -393,6 +409,103 @@ def price_items(items: List[dict]) -> dict:
     }
 
 # =========================
+# Local fallback (guaranteed output)
+# =========================
+def synthesize_3tier_from_prompt(app_name: str, extra: str, region: str) -> dict:
+    """Always return a minimal, valid diagram + TF for 3-tier App Service + Azure SQL."""
+    safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", app_name.lower())
+    diagram = f"""graph TD
+  U[User / Browser] --> FE[App Service: {app_name} Frontend]
+  FE --> BE[App Service: {app_name} Backend]
+  BE --> DB[(Azure SQL Database S0)]
+  subgraph Azure ({region})
+    SP[App Service Plan (Linux, S1)]
+    SP -. hosts .-> FE
+    SP -. hosts .-> BE
+    AI[(Application Insights)]
+    FE -. telemetry .-> AI
+    BE -. telemetry .-> AI
+  end
+"""
+    tf = f'''terraform {{
+  required_version = ">= 1.6.0"
+  required_providers {{
+    azurerm = {{ source = "hashicorp/azurerm" version = "~> 3.116" }}
+    random  = {{ source = "hashicorp/random"  version = "~> 3.6"   }}
+  }}
+}}
+provider "azurerm" {{ features {{}} }}
+variable "name" {{ default = "{safe_name}" }}
+variable "location" {{ default = "{region}" }}
+variable "resource_group_name" {{ default = "{safe_name}-rg" }}
+
+resource "azurerm_resource_group" "rg" {{
+  name     = var.resource_group_name
+  location = var.location
+}}
+
+resource "azurerm_service_plan" "plan" {{
+  name                = "${{var.name}}-plan"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  os_type             = "Linux"
+  sku_name            = "S1"
+}}
+
+resource "azurerm_application_insights" "ai" {{
+  name                = "${{var.name}}-ai"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  application_type    = "web"
+}}
+
+resource "azurerm_linux_web_app" "fe" {{
+  name                = "${{var.name}}-fe"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  service_plan_id     = azurerm_service_plan.plan.id
+  https_only          = true
+  site_config {{
+    application_stack {{ node_version = "20-lts" }}
+  }}
+  app_settings = {{
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.ai.connection_string
+  }}
+}}
+
+resource "azurerm_linux_web_app" "be" {{
+  name                = "${{var.name}}-be"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  service_plan_id     = azurerm_service_plan.plan.id
+  https_only          = true
+  site_config {{
+    application_stack {{ node_version = "20-lts" }}
+  }}
+  app_settings = {{
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.ai.connection_string
+  }}
+}}
+
+resource "azurerm_mssql_server" "sql" {{
+  name                         = "${{var.name}}-sqlsrv"
+  resource_group_name          = azurerm_resource_group.rg.name
+  location                     = azurerm_resource_group.rg.location
+  version                      = "12.0"
+  administrator_login          = "sqladminuser"
+  administrator_login_password = "ChangeMe123!ChangeMe123!"
+}}
+
+resource "azurerm_mssql_database" "db" {{
+  name           = "${{var.name}}-db"
+  server_id      = azurerm_mssql_server.sql.id
+  sku_name       = "S0"
+  max_size_gb    = 32
+}}
+'''
+    return {"diagram": diagram, "terraform": tf}
+
+# =========================
 # Public Endpoints
 # =========================
 @app.post("/estimate")
@@ -419,40 +532,49 @@ def estimate(payload: dict = Body(...), _=Depends(require_api_key)):
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
     Returns: { diagram: "<mermaid>", terraform: "<hcl>", cost: {...} }
+    Always returns a diagram/TF (fallback synthesis if AOAI is empty or down).
     """
     app_name = payload.get("app_name", "3-tier web app")
     extra = payload.get("prompt") or ""
     region = payload.get("region") or DEFAULT_REGION
 
-    system = (
-        "You are ArchGenie's Azure MCP.\n"
-        "Return ONLY valid JSON with keys diagram and terraform (no fences).\n"
-        "diagram: Mermaid code starting with 'graph'.\n"
-        "terraform: Valid Azure HCL (RG, plan/web apps, database, etc.)."
-    )
-    user = (
-        f"Create an Azure architecture for: {app_name}.\n"
-        f"Extra requirements (optional): {extra}\n"
-        f"Region: {region}\n"
-        "Respond JSON only."
-    )
+    diagram = ""
+    tf = ""
 
-    content = ""
+    # 1) Try Azure OpenAI (if configured)
     if _aoai_configured():
-        result = aoai_chat([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
+        system = (
+            "You are ArchGenie's Azure MCP.\n"
+            "Return ONLY valid JSON with keys diagram and terraform. No fences.\n"
+            "diagram: Mermaid code starting with 'graph'.\n"
+            "terraform: Valid Azure HCL (RG, plan/web apps, Azure SQL)."
+        )
+        user = (
+            f"Create an Azure architecture for: {app_name}.\n"
+            f"Extra requirements (optional): {extra}\n"
+            f"Region: {region}\n"
+            "Respond JSON only."
+        )
         try:
+            result = aoai_chat([
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
             content = result["choices"][0]["message"]["content"]
+            parsed = extract_json_or_fences(content)
+            diagram = strip_fences(parsed.get("diagram", "")) or ""
+            tf      = strip_fences(parsed.get("terraform", "")) or ""
         except Exception:
-            content = json.dumps(result)
+            diagram = ""
+            tf = ""
 
-    parsed = extract_json_or_fences(content)
-    diagram = strip_fences(parsed.get("diagram", ""))
-    tf      = strip_fences(parsed.get("terraform", ""))
+    # 2) Fallback if AOAI empty or not configured
+    if not diagram or not tf:
+        synth = synthesize_3tier_from_prompt(app_name, extra, region)
+        diagram = synth["diagram"]
+        tf = synth["terraform"]
 
-    # Derive items from request + generated outputs, then price them
+    # 3) Derive billable items and estimate cost
     items = normalize_to_items(ask=extra or app_name, diagram=diagram, tf=tf, region=region)
     estimate_obj = price_items(items)
 

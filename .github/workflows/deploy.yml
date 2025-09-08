@@ -77,10 +77,8 @@ jobs:
           ART="${{ steps.ver.outputs.ARTIFACT }}.tar.gz"
           rm -f "$ART"
           if [ -d "${{ env.FRONTEND_PATH }}/build" ]; then
-            # include frontend/build and backend/
             tar -czf "$ART" -C "${{ env.FRONTEND_PATH }}" build "${{ env.BACKEND_PATH }}"
           else
-            # include raw frontend/ and backend/
             tar -czf "$ART" "${{ env.FRONTEND_PATH }}" "${{ env.BACKEND_PATH }}"
           fi
           ls -lh "$ART"
@@ -145,12 +143,15 @@ jobs:
 
               FE_ROOT=/var/www/archgenie
               RELROOT=/opt/archgenie/releases
-              CURRENT=/opt/archgenie/current
+              BACKEND_DIR=/opt/archgenie/backend
+              LOG_FILE=\$BACKEND_DIR/backend.log
+              PID_FILE=\$BACKEND_DIR/uvicorn.pid
+              PORT=8000
 
               # Ensure base folders exist
-              sudo mkdir -p \"\$FE_ROOT\" \"\$RELROOT\"
+              sudo mkdir -p \"\$FE_ROOT\" \"\$RELROOT\" \"\$BACKEND_DIR\"
 
-              # Download bundle to /tmp
+              # Download bundle
               mkdir -p /tmp/archgenie
               if command -v azcopy >/dev/null 2>&1; then
                 azcopy copy \"\$BLOB\" \"/tmp/archgenie/\$ARTIFACT.tar.gz\"
@@ -167,29 +168,68 @@ jobs:
                 sudo rm -rf \"\$FE_ROOT\"/*
                 sudo cp -r /tmp/archgenie/unpacked/build/* \"\$FE_ROOT\"/
               else
-                # copy raw frontend folder if no build dir
                 sudo rm -rf \"\$FE_ROOT\"/*
                 sudo cp -r /tmp/archgenie/unpacked/${{ env.FRONTEND_PATH }}/* \"\$FE_ROOT\"/ 2>/dev/null || true
               fi
               sudo chown -R www-data:www-data \"\$FE_ROOT\"
 
-              # ---- BACKEND (blue/green) ----
+              # ---- BACKEND RELEASE COPY ----
               REL=\"\$RELROOT/\$VERSION\"
               sudo mkdir -p \"\$REL\"
               sudo rsync -a --delete /tmp/archgenie/unpacked/${{ env.BACKEND_PATH }}/ \"\$REL\"/
 
-              # Activate release
-              sudo ln -sfn \"\$REL\" \"\$CURRENT\"
+              # Copy chosen release into stable backend path
+              sudo rm -rf \"\$BACKEND_DIR\"/*
+              sudo rsync -a \"\$REL/\" \"\$BACKEND_DIR\"/
 
-              # Python deps (skip if not Python)
-              if command -v python3 >/dev/null 2>&1; then
-                cd \"\$CURRENT\"
-                python3 -m venv .venv
-                . .venv/bin/activate
-                if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+              # ---- PRUNE OLD RELEASES (keep last 5) ----
+              sudo bash -c 'ls -1dt \"'\"\$RELROOT\"'\"/* 2>/dev/null | tail -n +6 | xargs -r rm -rf'
+
+              # ---- (Re)START UVICORN WITH NOHUP ----
+              if [ -f \"\$PID_FILE\" ]; then
+                OLD_PID=\$(cat \"\$PID_FILE\" || true)
+                if [ -n \"\$OLD_PID\" ] && ps -p \"\$OLD_PID\" >/dev/null 2>&1; then
+                  sudo kill \"\$OLD_PID\" || true
+                fi
               fi
 
-              # Restart services
-              sudo systemctl restart archgenie-backend || true
+              PIDS=\$(pgrep -f 'uvicorn .*api:app' || true)
+              if [ -n \"\$PIDS\" ]; then
+                sudo kill \$PIDS || true
+              fi
+
+              if command -v lsof >/dev/null 2>&1; then
+                OCC=\$(lsof -ti :\$PORT || true)
+                if [ -n \"\$OCC\" ]; then
+                  sudo kill \$OCC || true
+                fi
+              elif command -v fuser >/dev/null 2>&1; then
+                sudo fuser -k \"\$PORT\"/tcp || true
+              fi
+
+              sleep 1
+              PIDS=\$(pgrep -f 'uvicorn .*api:app' || true)
+              if [ -n \"\$PIDS\" ]; then
+                sudo kill -9 \$PIDS || true
+              fi
+
+              # Start new process
+              cd \"\$BACKEND_DIR\"
+              : > \"\$LOG_FILE\" || true
+              nohup /usr/bin/python3 -m uvicorn api:app --host 0.0.0.0 --port \"\$PORT\" >> \"\$LOG_FILE\" 2>&1 &
+              NEW_PID=\$!
+              echo \"\$NEW_PID\" | sudo tee \"\$PID_FILE\" >/dev/null
+
+              sleep 2
+              if ! ps -p \"\$NEW_PID\" >/dev/null 2>&1; then
+                echo 'Uvicorn failed to start. Last 100 log lines:'
+                tail -n 100 \"\$LOG_FILE\" || true
+                exit 1
+              fi
+
               sudo systemctl restart nginx || true
+
+              echo \"Deployed version: \$VERSION\"
+              echo \"Uvicorn PID: \$NEW_PID\"
+              echo \"Logs: \$LOG_FILE\"
             "
