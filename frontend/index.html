@@ -4,38 +4,41 @@
     <meta charset="utf-8" />
     <title>ArchGenie</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-    <link rel="stylesheet" href="styles.css" />
+    <link href="./styles.css" rel="stylesheet" />
+    <!-- Mermaid (render API – we drive it manually via mermaidAPI) -->
+    <script src="https://unpkg.com/mermaid@10/dist/mermaid.min.js"></script>
   </head>
   <body>
-    <header>
-      <img src="logo.png" alt="ArchGenie Logo" class="logo" />
-      <h1>ArchGenie</h1>
-      <p>AI-powered Architecture Generator</p>
-      <p class="subtitle">Frontend served by Nginx, backend proxied at <code>/api</code>.</p>
-    </header>
+    <main class="wrap">
+      <header class="hero">
+        <img src="logo.png" alt="ArchGenie Logo" class="logo" />
+        <h1>ArchGenie</h1>
+        <p>AI-powered Architecture Generator</p>
+        <p class="sub">Frontend served by Nginx, backend proxied at <code>/api</code></p>
+      </header>
 
-    <main class="container">
-      <section class="card">
+      <section class="panel">
+        <div class="row">
+          <label>App Name</label>
+          <input id="appName" type="text" value="secure Azure 3-tier web app" />
+        </div>
+        <div class="row">
+          <label>Prompt</label>
+          <textarea id="prompt" rows="3" placeholder="e.g. frontend & backend as App Service, use MSSQL database"></textarea>
+        </div>
         <div class="row">
           <div class="col">
-            <label for="apiKey">API Key (x-api-key)</label>
-            <input id="apiKey" type="password" placeholder="CAL_API_KEY" />
+            <label>Region (optional)</label>
+            <input id="region" type="text" placeholder="eastus (defaults in backend)" />
           </div>
           <div class="col">
-            <label for="appName">App / Use case</label>
-            <input id="appName" type="text" placeholder="secure Azure 3-tier web app" />
+            <label>API Key (x-api-key)</label>
+            <input id="apiKey" type="password" placeholder="super-secret-key" />
           </div>
         </div>
-
-        <label for="prompt">Custom prompt (optional)</label>
-        <textarea id="prompt" rows="5" placeholder="constraints, regions, SKUs, compliance..."></textarea>
-
-        <div class="btnrow">
-          <button id="btnAzure">Generate with Azure MCP</button>
-          <button id="btnAWS" class="ghost">Mock AWS</button>
-          <button id="btnGCP" class="ghost">Mock GCP</button>
-          <span id="status"></span>
+        <div class="row actions">
+          <button id="btnGenerate">Generate with Azure MCP</button>
+          <span id="status" class="status"></span>
         </div>
       </section>
 
@@ -43,60 +46,40 @@
         <div class="card">
           <div class="card-head">
             <h3>Architecture Diagram</h3>
-            <div class="tools">
-              <select id="zoom">
-                <option value="fit">Fit</option>
-                <option value="1">100%</option>
-                <option value="1.5">150%</option>
-                <option value="2">200%</option>
-              </select>
-              <button id="dlSvg" class="ghost">Download SVG</button>
-              <button id="dlPng" class="ghost">Download PNG</button>
+            <div class="right">
+              <button id="btnSvg">Download SVG</button>
+              <button id="btnPng">Download PNG</button>
             </div>
           </div>
-
-          <div id="diagramWrap">
-            <div id="diagram" class="diagram"></div>
-          </div>
-
-          <details class="raw">
-            <summary>Show diagram source</summary>
-            <pre id="diagramSrc"></pre>
-          </details>
+          <!-- We will inject an SVG here using mermaidAPI.render -->
+          <div id="diagramHost" class="diagram-host"></div>
         </div>
 
         <div class="card">
-          <h3>Terraform</h3>
-          <pre id="tf" class="code"></pre>
-          <div class="btnrow">
-            <button id="copyTf">Copy Terraform</button>
-            <a id="downloadTf" download="archgenie.tf" class="ghost">Download .tf</a>
+          <div class="card-head">
+            <h3>Terraform</h3>
+            <div class="right">
+              <button id="btnCopyTf">Copy</button>
+              <button id="btnDlTf">Download .tf</button>
+            </div>
           </div>
+          <textarea id="tfOut" class="code" rows="16" spellcheck="false"></textarea>
         </div>
 
         <div class="card">
-          <h3>Estimated Cost</h3>
-          <div id="costSummary" class="muted">Run Azure MCP or paste items to estimate.</div>
-          <table id="costTable" class="cost hidden">
-            <thead>
-              <tr>
-                <th>Cloud</th><th>Service</th><th>SKU</th><th>Qty</th><th>Region</th><th>Unit/mo</th><th>Monthly</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-            <tfoot>
-              <tr><td colspan="6" class="right">Total</td><td id="costTotal"></td></tr>
-            </tfoot>
-          </table>
-          <details class="raw" id="costNotesWrap" style="margin-top:8px; display:none;">
-            <summary>Notes</summary>
-            <ul id="costNotes"></ul>
-          </details>
+          <div class="card-head">
+            <h3>Estimated Monthly Cost</h3>
+            <div class="right"></div>
+          </div>
+          <div id="pricing"></div>
         </div>
       </section>
+
+      <footer class="foot">
+        <small>© ArchGenie</small>
+      </footer>
     </main>
 
-    <footer><small>© ArchGenie • Demo UI</small></footer>
-    <script defer src="app.js"></script>
+    <script src="./app.js"></script>
   </body>
 </html>

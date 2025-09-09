@@ -38,7 +38,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="6.0.0")
+app = FastAPI(title="ArchGenie Backend", version="6.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -105,51 +105,61 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
     if m: out["terraform"] = m.group(2).strip()
     return out
 
+# =========================
+# Mermaid sanitizer (fix renderer quirks)
+# =========================
 def sanitize_mermaid(src: str) -> str:
     """
-    Harden Mermaid for strict renderers:
-      - Quote subgraph titles with parentheses: subgraph "Azure (eastus)"
-      - Strip any ';' after subgraph header
-      - Use pipes around edge labels: '-. |hosts| .->'
-      - Append semicolons to node/edge lines only (NOT to 'subgraph' or 'end')
-      - Remove commas in [] labels; keep 'end' clean; ensure trailing newline
+    - subgraph "Title (region)"  (no trailing ';')
+    - Keep ';' at end of EDGE lines, remove it from NODE lines
+    - Normalize '-. label .->' -> '-. |label| .->'
+    - If a node closing ']' or ')' is immediately followed by another token (e.g., ']SP'), insert a newline
+    - Remove commas inside [] labels
+    - Ensure trailing newline
     """
     if not src:
         return src
     s = src
 
-    # Quote titles like: subgraph Azure (eastus) -> subgraph "Azure (eastus)"
+    # Quote titles like: subgraph Azure (eastus) -> subgraph "Azure (eastus)" ; strip trailing ';'
     s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
-
-    # Remove trailing ';' from subgraph header
     s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
 
     # Normalize dashed edge labels to pipe form
     s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
 
-    # Add semicolons to node/edge statements only
-    def add_semicolon(line: str) -> str:
+    # Normalize node vs edge line endings
+    out_lines: List[str] = []
+    for line in s.splitlines():
         raw = line.rstrip()
-        if not raw:
-            return line
-        head = raw.lstrip()
-        if head.startswith("subgraph") or head == "end":
-            # strip accidental 'end;'
-            if head == "end" and raw.endswith(";"):
-                return raw[:-1] + "\n"
-            return line
-        if raw.endswith(";"):
-            return line
-        if re.search(r'(-->|\-\.\s*\|.*?\|\s*\.\->|---|\[.*\]|\(.*\))', raw):
-            return raw + ";\n"
-        return line
-    s = "".join(add_semicolon(l) for l in s.splitlines(True))
+        stripped = raw.strip()
+        if not stripped:
+            out_lines.append("")  # preserve blank
+            continue
+        if stripped.startswith("subgraph"):
+            out_lines.append(stripped)  # no semicolon
+            continue
+        if stripped == "end":
+            out_lines.append("end")
+            continue
 
-    # Clean 'end'
-    s = re.sub(r'^\s*end;?\s*$', 'end', s, flags=re.MULTILINE)
+        is_edge = ("--" in stripped) or (".->" in stripped) or ("---" in stripped)
+        if is_edge:
+            if not stripped.endswith(";"):
+                stripped += ";"
+            out_lines.append(stripped)
+        else:
+            # Node line: remove trailing ';'
+            stripped = stripped.rstrip(";")
+            out_lines.append(stripped)
 
-    # Remove commas in labels inside []
+    s = "\n".join(out_lines)
+
+    # Force newline if a node closing bracket/paren is followed by another token (fixes ...]SP)
+    s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
+
+    # Remove commas inside [] labels
     s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
 
     if not s.endswith("\n"):
@@ -214,7 +224,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     if "application insights" in blob or "monitor" in blob or "log analytics" in blob:
         add("azure", "monitor", "LogAnalytics", qty=1)
 
-    # Optional: let AOAI propose items too (kept simple)
+    # Optional: let AOAI propose items too
     if ask.strip() and _aoai_configured():
         try:
             system = (
@@ -490,10 +500,10 @@ def synthesize_3tier_from_prompt(app_name: str, extra: str, region: str) -> dict
   FE --> BE[App Service: {app_name} Backend];
   BE --> DB[(Azure SQL Database S0)];
   subgraph "Azure ({region})"
-    SP[App Service Plan (Linux S1)];
+    SP[App Service Plan (Linux S1)]
     SP -. |hosts| .-> FE;
     SP -. |hosts| .-> BE;
-    AI[(Application Insights)];
+    AI[(Application Insights)]
     FE -. |telemetry| .-> AI;
     BE -. |telemetry| .-> AI;
   end
@@ -529,7 +539,7 @@ resource "azurerm_linux_web_app" "fe" {{
 resource "azurerm_linux_web_app" "be" {{
   name                = "{safe_name}-be"
   resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  location            = {json.dumps(region)}
   service_plan_id     = azurerm_service_plan.plan.id
   https_only          = true
 }}
@@ -537,7 +547,7 @@ resource "azurerm_linux_web_app" "be" {{
 resource "azurerm_mssql_server" "sql" {{
   name                         = "{safe_name}-sqlsrv"
   resource_group_name          = azurerm_resource_group.rg.name
-  location                     = azurerm_resource_group.rg.location
+  location                     = "{region}"
   version                      = "12.0"
   administrator_login          = "sqladminuser"
   administrator_login_password = "ChangeMe123!ChangeMe123!"
@@ -605,7 +615,7 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
         synth = synthesize_3tier_from_prompt(app_name, extra, region)
         diagram, tf = synth["diagram"], synth["terraform"]
 
-    # 3) Sanitize Mermaid for renderer quirks
+    # 3) Sanitize Mermaid for renderer quirks (fixes node/edge semicolons, glued lines)
     diagram = sanitize_mermaid(diagram)
 
     # 4) Derive billable items and estimate cost (public retail prices)
@@ -625,3 +635,50 @@ def pricing_azure_retail(payload: dict = Body(default={}), _=Depends(require_api
     raw   = payload.get("filter") or build_filter_from_payload(payload)
     items = azure_retail_prices_fetch(raw, limit=limit)
     return {"filter": raw, "count": len(items), "items": items}
+
+# ----------------- AWS / GCP Mocks (diagrams + TF) -----------------
+@app.get("/mcp/aws/diagram-tf")
+def aws_mock(_=Depends(require_api_key)):
+    return {
+        "diagram": """graph TD
+  subgraph AWS
+    A[ALB] --> B[EC2: web-1]
+    B --> C[RDS: archgenie-db]
+    B --> D[S3: assets]
+  end
+""",
+        "terraform": """# mock demo
+resource "aws_instance" "web" {
+  ami           = "ami-123456"
+  instance_type = "t3.micro"
+}
+
+resource "aws_s3_bucket" "assets" {
+  bucket = "archgenie-assets"
+}
+"""
+    }
+
+@app.get("/mcp/gcp/diagram-tf")
+def gcp_mock(_=Depends(require_api_key)):
+    return {
+        "diagram": """graph TD
+  subgraph GCP
+    A[Load Balancer] --> B[Compute Engine: web-1]
+    B --> C[Cloud SQL: archgenie-db]
+    B --> D[Cloud Storage: assets]
+  end
+""",
+        "terraform": """# mock demo
+resource "google_compute_instance" "web" {
+  name         = "web-1"
+  machine_type = "e2-micro"
+  zone         = "us-central1-a"
+}
+
+resource "google_storage_bucket" "assets" {
+  name     = "archgenie-assets"
+  location = "US"
+}
+"""
+    }

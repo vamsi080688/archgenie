@@ -1,278 +1,215 @@
-/* global mermaid */
-const $ = (id) => document.getElementById(id);
-const apiBase = "/api"; // nginx proxies /api -> 127.0.0.1:8000
-let lastSVG = "";
-let currentScale = "fit";
+// Initialize Mermaid – we will render via mermaidAPI directly (no auto-init)
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
 
-mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });
+const el = (id) => document.getElementById(id);
+const appNameInput = el('appName');
+const promptInput  = el('prompt');
+const regionInput  = el('region');
+const apiKeyInput  = el('apiKey');
+const btnGenerate  = el('btnGenerate');
+const statusEl     = el('status');
+const diagramHost  = el('diagramHost');
+const btnSvg       = el('btnSvg');
+const btnPng       = el('btnPng');
+const tfOut        = el('tfOut');
+const btnCopyTf    = el('btnCopyTf');
+const btnDlTf      = el('btnDlTf');
+const pricingDiv   = el('pricing');
 
-// restore apiKey from localStorage (dev)
-(function init(){
-  const saved = localStorage.getItem("archgenie.apiKey");
-  if (saved) $("apiKey").value = saved;
-  $("appName").value = "secure Azure 3-tier web app";
-  $("zoom").value = "fit";
-})();
+let lastSvg = '';     // store rendered SVG for download
+let lastDiagram = ''; // store mermaid text (sanitized by backend)
+let lastTf = '';
+let lastCost = null;
 
-$("apiKey").addEventListener("change", () =>
-  localStorage.setItem("archgenie.apiKey", $("apiKey").value.trim())
-);
-
-$("btnAzure").addEventListener("click", () => runAzure());
-$("btnAWS").addEventListener("click", () => runMock("aws"));
-$("btnGCP").addEventListener("click", () => runMock("gcp"));
-
-$("copyTf").addEventListener("click", () =>
-  navigator.clipboard.writeText($("tf").textContent || "")
-);
-$("downloadTf").addEventListener("click", () => {
-  const blob = new Blob([$("tf").textContent || ""], { type: "text/plain" });
-  $("downloadTf").href = URL.createObjectURL(blob);
-});
-
-$("zoom").addEventListener("change", () => applyZoom());
-$("dlSvg").addEventListener("click", () => downloadSVG());
-$("dlPng").addEventListener("click", () => downloadPNG());
-
-function flash(msg, kind="info"){
-  const el = $("status"); el.textContent = msg;
-  el.style.color = kind==="ok" ? "#86efac" : kind==="err" ? "#fca5a5" : "";
-  setTimeout(()=> el.textContent="", 4000);
+// If something upstream collapses newlines, this extra FE guard helps:
+function lastMileSanitize(diagram) {
+  // Remove any trailing ; after subgraph header (belt-and-suspenders)
+  diagram = diagram.replace(/^(\s*subgraph[^\n;]*);+\s*$/gm, '$1');
+  // Ensure a newline between node end bracket and next token (fix ...]SP)
+  diagram = diagram.replace(/(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))/g, '$1\n');
+  return diagram;
 }
 
-function cleanFence(s){
-  if(!s) return "";
-  s = s.trim();
-  const langs = ["mermaid","hcl","terraform","json"];
-  for(const lang of langs){
-    const re = new RegExp("^```"+lang+"\\s*\\n([\\s\\S]*?)```\\s*$","i");
-    const m = s.match(re); if(m) return m[1].trim();
+async function callAzureMcp() {
+  const appName = appNameInput.value.trim() || '3-tier web app';
+  const prompt  = promptInput.value.trim();
+  const region  = regionInput.value.trim();
+  const apiKey  = apiKeyInput.value.trim();
+
+  if (!apiKey) {
+    statusEl.textContent = 'Please enter your x-api-key.';
+    return;
   }
-  const generic = s.match(/^```[\s\S]*?\n([\s\S]*?)```$/);
-  return generic ? generic[1].trim() : s;
-}
 
-async function runAzure(){
-  const key = $("apiKey").value.trim();
-  if(!key) return flash("Enter x-api-key", "err");
-  const appName = $("appName").value.trim() || "3-tier web app";
-  const extra = $("prompt").value.trim();
+  btnGenerate.disabled = true;
+  statusEl.textContent = 'Generating...';
 
-  flash("Calling Azure MCP…");
-  try{
-    const res = await fetch(`${apiBase}/mcp/azure/diagram-tf`, {
-      method: "POST",
-      headers: {"Content-Type":"application/json","x-api-key": key},
-      body: JSON.stringify({ app_name: appName, prompt: extra || undefined })
+  try {
+    const body = { app_name: appName, prompt };
+    if (region) body.region = region;
+
+    const res = await fetch('/api/mcp/azure/diagram-tf', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey
+      },
+      body: JSON.stringify(body)
     });
-    if(!res.ok) throw new Error(await res.text());
-    const data = await res.json();
 
-    const diagram = cleanFence(data.diagram || "");
-    const tf = cleanFence(data.terraform || "");
-    renderDiagram(diagram);
-    showTF(tf);
-
-    // Show cost if present; if not, call /estimate with diagram/terraform
-    if (data.cost) {
-      renderCost(data.cost);
-    } else {
-      await estimateCost({ diagram, terraform: tf });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Backend error (${res.status}): ${errText}`);
     }
 
-    flash("Azure MCP response ready", "ok");
-  }catch(e){
-    console.error(e);
-    flash(`Azure MCP error: ${e.message}`, "err");
-  }
-}
-
-async function estimateCost({ items, diagram, terraform, region }){
-  const key = $("apiKey").value.trim();
-  try{
-    const res = await fetch(`${apiBase}/estimate`, {
-      method:"POST",
-      headers: {"Content-Type":"application/json", "x-api-key": key},
-      body: JSON.stringify({ items, diagram, terraform, region })
-    });
-    if(!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    renderCost(data.estimate);
-  }catch(e){
+    lastDiagram = (data.diagram || '').trim();
+    lastTf      = (data.terraform || '').trim();
+    lastCost    = data.cost || null;
+
+    // FE last-mile sanitization to prevent accidental line gluing
+    const safeDiagram = lastMileSanitize(lastDiagram);
+
+    await renderMermaidToSvg(safeDiagram);
+    renderTerraform(lastTf);
+    renderPricing(lastCost);
+
+    statusEl.textContent = 'Done.';
+  } catch (e) {
     console.error(e);
-    flash(`Cost estimate error: ${e.message}`, "err");
+    statusEl.textContent = e.message || 'Request failed.';
+    // show some context in the diagram area
+    diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(lastDiagram || '(no diagram)')}</pre>`;
+  } finally {
+    btnGenerate.disabled = false;
   }
 }
 
-async function runMock(which){
-  const key = $("apiKey").value.trim();
-  if(!key) return flash("Enter x-api-key", "err");
-  flash(`Calling ${which.toUpperCase()} mock…`);
-  try{
-    const res = await fetch(`${apiBase}/mcp/${which}/diagram-tf`, { headers: {"x-api-key": key} });
-    if(!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    const diagram = cleanFence(data.diagram||"");
-    const tf = cleanFence(data.terraform||"");
-    renderDiagram(diagram);
-    showTF(tf);
-    // No live costing for AWS/GCP mocks; clear the cost table
-    renderCost(null);
-    flash(`${which.toUpperCase()} mock ready`, "ok");
-  }catch(e){
-    console.error(e);
-    flash(`${which} mock error: ${e.message}`, "err");
+async function renderMermaidToSvg(diagramText) {
+  // Render via mermaidAPI to get SVG. We generate a unique ID to avoid collisions.
+  const id = 'arch-' + Math.random().toString(36).slice(2, 9);
+  try {
+    const { svg } = await mermaid.render(id, diagramText);
+    lastSvg = svg;
+    diagramHost.innerHTML = svg;
+    // Make diagram area scrollable but full-width
+    diagramHost.querySelector('svg')?.setAttribute('width', '100%');
+  } catch (err) {
+    console.error('Mermaid render error', err);
+    // Fallback: show raw text for debugging
+    diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(diagramText)}</pre>`;
   }
 }
 
-function renderDiagram(src){
-  $("diagramSrc").textContent = src || "";
-  const container = $("diagram");
-  container.innerHTML = "";
-  lastSVG = "";
-  currentScale = $("zoom").value;
-
-  if(!src.trim()){ container.textContent = "No diagram received"; return; }
-
-  const id = "mmd-" + Math.random().toString(36).slice(2);
-  mermaid.render(id, src).then(({svg}) => {
-    const responsive = svg.replace(/width="[^"]+"/, 'width="100%"').replace(/height="[^"]+"/, '');
-    container.innerHTML = responsive;
-    lastSVG = container.querySelector("svg")?.outerHTML || "";
-    applyZoom();
-  }).catch(err => {
-    container.innerHTML = `<pre class="code">${escapeHtml(String(err))}\n\n${escapeHtml(src)}</pre>`;
-  });
+function renderTerraform(tf) {
+  tfOut.value = tf || '';
 }
 
-function applyZoom(){
-  const svg = $("diagram").querySelector("svg");
-  if(!svg) return;
-  const wrap = $("diagramWrap");
-  const z = $("zoom").value;
-  currentScale = z;
-  svg.style.transformOrigin = "top left";
-  svg.style.transform = "";
-  if(z === "fit"){
-    svg.style.width = "100%";
-  } else {
-    const factor = parseFloat(z) || 1;
-    svg.style.width = "";
-    svg.style.transform = `scale(${factor})`;
-    wrap.scrollTop = 0; wrap.scrollLeft = 0;
+function renderPricing(costObj) {
+  if (!costObj || !Array.isArray(costObj.items)) {
+    pricingDiv.innerHTML = '<p class="muted">No cost data.</p>';
+    return;
   }
+  const rows = costObj.items.map(it => {
+    const size = it.size_gb ? `${it.size_gb} GB` : '';
+    const hours = it.hours ? `${it.hours} h/mo` : '';
+    return `
+      <tr>
+        <td>${it.cloud}</td>
+        <td>${it.service}</td>
+        <td>${escapeHtml(it.sku || '')}</td>
+        <td>${it.region}</td>
+        <td style="text-align:right">${it.qty}</td>
+        <td>${size}</td>
+        <td>${hours}</td>
+        <td style="text-align:right">$${Number(it.unit_monthly || 0).toFixed(2)}</td>
+        <td style="text-align:right">$${Number(it.monthly || 0).toFixed(2)}</td>
+      </tr>`;
+  }).join('');
+  const total = Number(costObj.total_estimate || 0).toFixed(2);
+  const notes = (costObj.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+  pricingDiv.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Cloud</th><th>Service</th><th>SKU</th><th>Region</th>
+          <th style="text-align:right">Qty</th><th>Size</th><th>Hours</th>
+          <th style="text-align:right">Unit/Month</th>
+          <th style="text-align:right">Monthly</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        <tr>
+          <td colspan="8" style="text-align:right">Total (${costObj.currency || 'USD'})</td>
+          <td style="text-align:right">$${total}</td>
+        </tr>
+      </tfoot>
+    </table>
+    ${notes ? `<p style="margin-top:8px"><strong>Notes:</strong></p><ul>${notes}</ul>` : ''}
+  `;
 }
 
-function showTF(tf){ $("tf").textContent = tf || ""; }
-
-function downloadSVG(){
-  if(!lastSVG){ flash("No diagram to download", "err"); return; }
-  const blob = new Blob([lastSVG], {type: "image/svg+xml;charset=utf-8"});
-  triggerDownload(blob, "archgenie-diagram.svg");
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-function downloadPNG(){
-  if(!lastSVG){ flash("No diagram to download", "err"); return; }
-  const img = new Image();
-  const svgBlob = new Blob([lastSVG], {type: "image/svg+xml;charset=utf-8"});
-  const url = URL.createObjectURL(svgBlob);
-  img.onload = () => {
-    const scale = currentScale === "fit" ? 1 : parseFloat(currentScale) || 1;
-    const w = img.width * scale, h = img.height * scale;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.floor(w));
-    canvas.height = Math.max(1, Math.floor(h));
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#0b1221";
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
-    canvas.toBlob((blob)=> triggerDownload(blob, "archgenie-diagram.png"));
-  };
-  img.onerror = () => { URL.revokeObjectURL(url); flash("PNG render failed", "err"); };
-  img.src = url;
-}
-
-$("dlSvg").addEventListener("click", downloadSVG);
-$("dlPng").addEventListener("click", downloadPNG);
-
-function triggerDownload(blob, filename){
-  const a = document.createElement("a");
+// --- Downloads ---
+btnSvg.addEventListener('click', () => {
+  if (!lastSvg) return;
+  const blob = new Blob([lastSvg], { type: 'image/svg+xml;charset=utf-8' });
+  const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
+  a.download = 'archgenie-diagram.svg';
   a.click();
-  requestAnimationFrame(()=> {
-    URL.revokeObjectURL(a.href);
-    document.body.removeChild(a);
-  });
-}
+  URL.revokeObjectURL(a.href);
+});
 
-function renderCost(estimate){
-  const table = $("costTable");
-  const tbody = table.querySelector("tbody");
-  const totalEl = $("costTotal");
-  const sum = $("costSummary");
-  const notesWrap = $("costNotesWrap");
-  const notesList = $("costNotes");
+btnPng.addEventListener('click', async () => {
+  if (!lastSvg) return;
+  const svgEl = new DOMParser().parseFromString(lastSvg, 'image/svg+xml').documentElement;
+  const svgText = new XMLSerializer().serializeToString(svgEl);
 
-  tbody.innerHTML = "";
-  notesList.innerHTML = "";
+  const canvas = document.createElement('canvas');
+  const bbox = diagramHost.querySelector('svg')?.getBBox?.();
+  const width = Math.max(1024, (bbox?.width || 1024));
+  const height = Math.max(768, (bbox?.height || 768));
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
 
-  if(!estimate){
-    sum.textContent = "No cost estimate available for this cloud.";
-    table.classList.add("hidden");
-    notesWrap.style.display = "none";
-    return;
+  const img = new Image();
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0);
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = 'archgenie-diagram.png';
+    a.click();
+  };
+  img.onerror = e => console.error('PNG export failed', e);
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+});
+
+btnCopyTf.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(tfOut.value || '');
+    btnCopyTf.textContent = 'Copied!';
+    setTimeout(() => btnCopyTf.textContent = 'Copy', 1000);
+  } catch(e) {
+    console.error(e);
   }
+});
 
-  const { currency, total_estimate, items = [], notes = [] } = estimate;
-  if (items.length === 0){
-    sum.textContent = "No billable items detected.";
-    table.classList.add("hidden");
-    notesWrap.style.display = notes.length ? "block" : "none";
-    notes.forEach(n => {
-      const li = document.createElement("li");
-      li.textContent = n;
-      notesList.appendChild(li);
-    });
-    return;
-  }
+btnDlTf.addEventListener('click', () => {
+  const blob = new Blob([tfOut.value || ''], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'main.tf';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
 
-  items.forEach(it => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(it.cloud || "")}</td>
-      <td>${escapeHtml(it.service || "")}</td>
-      <td>${escapeHtml(it.sku || "")}</td>
-      <td>${Number(it.qty || 0)}</td>
-      <td>${escapeHtml(it.region || "")}</td>
-      <td>${fmtMoney(it.unit_monthly, currency)}</td>
-      <td>${fmtMoney(it.monthly, currency)}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+btnGenerate.addEventListener('click', callAzureMcp);
 
-  totalEl.textContent = fmtMoney(total_estimate, currency);
-  sum.textContent = `Estimated monthly total: ${fmtMoney(total_estimate, currency)} (${estimate.method})`;
-  table.classList.remove("hidden");
-
-  if (notes && notes.length){
-    notesWrap.style.display = "block";
-    notes.forEach(n => {
-      const li = document.createElement("li");
-      li.textContent = n;
-      notesList.appendChild(li);
-    });
-  } else {
-    notesWrap.style.display = "none";
-  }
-}
-
-function fmtMoney(v, currency="USD"){
-  if (v === null || v === undefined) return "-";
-  try { return new Intl.NumberFormat(undefined, {style:"currency", currency}).format(Number(v)); }
-  catch { return `$${Number(v).toFixed(2)}`; }
-}
-
-function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+// Optional: prefill test generate
+// callAzureMcp();
