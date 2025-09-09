@@ -37,7 +37,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="5.1.0")
+app = FastAPI(title="ArchGenie Backend", version="5.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -105,17 +105,39 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
 
 def sanitize_mermaid(src: str) -> str:
     """
-    Make Mermaid subgraph lines parser-friendly:
-    - Convert `subgraph Something (region)` -> `subgraph "Something (region)"`
+    Harden Mermaid for strict renderers:
+      - Quote subgraph titles with parentheses: subgraph "Azure (eastus)"
+      - Ensure link labels use pipes: '-. |hosts| .->'
+      - Append semicolons on likely node/edge lines
+      - Remove commas inside [...] labels
     """
     if not src:
         return src
-    return re.sub(
-        r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*$',
-        r'subgraph "\1 (\2)"',
-        src,
-        flags=re.MULTILINE
-    )
+    s = src
+
+    # 1) subgraph Something (region)  ->  subgraph "Something (region)"
+    s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*$',
+               r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
+
+    # 2) '-. hosts .->' -> '-. |hosts| .->'
+    s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
+
+    # 3) Add semicolons to end of lines that look like node/edge statements
+    def add_semicolon(line: str) -> str:
+        raw = line.rstrip()
+        if not raw or raw.startswith("subgraph") or raw == "end":
+            return line
+        if raw.endswith(";"):
+            return line
+        if re.search(r'(-->|\-\.\s*\|.*?\|\s*\.\->|---|\[.*\]|\(.*\))', raw):
+            return raw + ";\n"
+        return line
+    s = "".join(add_semicolon(l) for l in s.splitlines(True))
+
+    # 4) Remove commas inside [] labels to avoid edge-case parsers choking
+    s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
+
+    return s
 
 # =========================
 # Normalizer (ask/diagram/tf -> items)
@@ -456,16 +478,16 @@ def synthesize_3tier_from_prompt(app_name: str, extra: str, region: str) -> dict
     """Always return a minimal, valid diagram + TF for 3-tier App Service + Azure SQL."""
     safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", app_name.lower())
     diagram = f"""graph TD
-  U[User / Browser] --> FE[App Service: {app_name} Frontend]
-  FE --> BE[App Service: {app_name} Backend]
-  BE --> DB[(Azure SQL Database S0)]
+  U[User / Browser] --> FE[App Service: {app_name} Frontend];
+  FE --> BE[App Service: {app_name} Backend];
+  BE --> DB[(Azure SQL Database S0)];
   subgraph "Azure ({region})"
-    SP[App Service Plan (Linux, S1)]
-    SP -. hosts .-> FE
-    SP -. hosts .-> BE
-    AI[(Application Insights)]
-    FE -. telemetry .-> AI
-    BE -. telemetry .-> AI
+    SP[App Service Plan (Linux S1)];
+    SP -. |hosts| .-> FE;
+    SP -. |hosts| .-> BE;
+    AI[(Application Insights)];
+    FE -. |telemetry| .-> AI;
+    BE -. |telemetry| .-> AI;
   end
 """
     tf = f'''terraform {{
@@ -682,9 +704,9 @@ def aws_mock(_=Depends(require_api_key)):
     return {
         "diagram": """graph TD
   subgraph AWS
-    A[ALB] --> B[EC2: web-1]
-    B --> C[RDS: archgenie-db]
-    B --> D[S3: assets]
+    A[ALB] --> B[EC2: web-1];
+    B --> C[RDS: archgenie-db];
+    B --> D[S3: assets];
   end
 """,
         "terraform": """# mock demo
@@ -704,9 +726,9 @@ def gcp_mock(_=Depends(require_api_key)):
     return {
         "diagram": """graph TD
   subgraph GCP
-    A[Load Balancer] --> B[Compute Engine: web-1]
-    B --> C[Cloud SQL: archgenie-db]
-    B --> D[Cloud Storage: assets]
+    A[Load Balancer] --> B[Compute Engine: web-1];
+    B --> C[Cloud SQL: archgenie-db];
+    B --> D[Cloud Storage: assets];
   end
 """,
         "terraform": """# mock demo
