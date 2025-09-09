@@ -37,7 +37,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="5.2.0")
+app = FastAPI(title="ArchGenie Backend", version="5.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -107,22 +107,27 @@ def sanitize_mermaid(src: str) -> str:
     """
     Harden Mermaid for strict renderers:
       - Quote subgraph titles with parentheses: subgraph "Azure (eastus)"
+      - Remove any ';' after 'subgraph' header
       - Ensure link labels use pipes: '-. |hosts| .->'
-      - Append semicolons on likely node/edge lines
-      - Remove commas inside [...] labels
+      - Append semicolons to node/edge lines (NOT to 'subgraph' or 'end')
+      - Remove commas in [] labels
+      - Keep 'end' on its own line
     """
     if not src:
         return src
     s = src
 
-    # 1) subgraph Something (region)  ->  subgraph "Something (region)"
+    # 1) Quote titles that include parentheses
     s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*$',
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
 
-    # 2) '-. hosts .->' -> '-. |hosts| .->'
+    # 2) Remove any trailing ';' after subgraph header lines
+    s = re.sub(r'^(?P<hdr>\s*subgraph[^\n;]*);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
+
+    # 3) Normalize edge labels to pipes
     s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
 
-    # 3) Add semicolons to end of lines that look like node/edge statements
+    # 4) Add semicolons to node/edge lines (but not 'subgraph' or 'end')
     def add_semicolon(line: str) -> str:
         raw = line.rstrip()
         if not raw or raw.startswith("subgraph") or raw == "end":
@@ -134,7 +139,10 @@ def sanitize_mermaid(src: str) -> str:
         return line
     s = "".join(add_semicolon(l) for l in s.splitlines(True))
 
-    # 4) Remove commas inside [] labels to avoid edge-case parsers choking
+    # 5) Keep 'end' on its own line
+    s = re.sub(r'(\S)\s+end\s*$', r'\1\nend', s, flags=re.MULTILINE)
+
+    # 6) Remove commas inside [] labels (some parsers choke)
     s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
 
     return s
@@ -151,7 +159,7 @@ item schema:
   "qty": 1,
   "region": "eastus",
   "size_gb": 100,   # optional for per-GB services
-  "hours": 730      # optional if duty-cycle specified
+  "hours": 730      # optional duty-cycle
 }
 """
 def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: Optional[str] = None) -> List[dict]:
@@ -254,10 +262,6 @@ def azure_price_query(filter_str: str) -> Optional[Dict[str, Any]]:
     return items[0] if items else None
 
 def azure_retail_prices_fetch(filter_str: str, limit: int = 50) -> list:
-    """
-    Fetch public retail prices matching $filter. Follows nextPageLink up to 'limit' items.
-    Docs: https://prices.azure.com/api/retail/prices
-    """
     base = "https://prices.azure.com/api/retail/prices"
     params = {"api-version": "2023-01-01-preview", "$filter": filter_str}
     out = []
@@ -279,11 +283,6 @@ def azure_retail_prices_fetch(filter_str: str, limit: int = 50) -> list:
     return out
 
 def build_filter_from_payload(p: dict) -> str:
-    """
-    Build a robust $filter from structured fields.
-    Supported keys: serviceName, armRegionName, meterName, skuName, productName, meterCategory.
-    Also supports 'contains' for meterName/productName (pass as dict: {"meterName": "Transactions"}).
-    """
     parts = []
     def eq(k):
         v = p.get(k)
@@ -349,7 +348,7 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     f = f"serviceName eq 'Storage' and armRegionName eq '{region}' and contains(skuName, 'LRS')"
     item = azure_price_query(f)
     if not item: return None
-    price = monthly_from_retail(item)  # usually per-GB per-month
+    price = monthly_from_retail(item)  # per-GB per-month typically
     cache_put(key, price)
     return price
 
@@ -613,7 +612,7 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
         diagram = synth["diagram"]
         tf = synth["terraform"]
 
-    # 3) Sanitize Mermaid for parser quirks
+    # 3) Sanitize Mermaid for parser quirks (removes ';' after subgraph, etc.)
     diagram = sanitize_mermaid(diagram)
 
     # 4) Derive billable items and estimate cost
@@ -675,7 +674,6 @@ def pricing_azure_retail(payload: dict = Body(default={}), _=Depends(require_api
         elif "month" in uom:
             est_monthly = round(price * qty, 2)
         elif "gb" in uom:
-            # treat qty as GB-month if caller passes size
             est_monthly = round(price * qty, 2)
 
         enriched.append({
