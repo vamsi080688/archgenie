@@ -27,6 +27,10 @@ HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
 # Default region if none provided by user
 DEFAULT_REGION = os.getenv("DEFAULT_REGION", "eastus")
 
+# App Gateway defaults (capacity units) and SQL meter filtering
+DEFAULT_APPGW_CAPACITY_UNITS = int(os.getenv("DEFAULT_APPGW_CAPACITY_UNITS", "1"))
+DEFAULT_SQL_COMPUTE_ONLY = os.getenv("DEFAULT_SQL_COMPUTE_ONLY", "true").lower() == "true"
+
 # =========================
 # Auth
 # =========================
@@ -37,7 +41,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.2.0")
+app = FastAPI(title="ArchGenie Backend", version="7.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -185,6 +189,10 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
 
     if re.search(r"\bapplication gateway\b|\bapp gateway\b|\bapp gw\b", blob):
         add("azure", "app_gateway", "WAF_v2", qty=1)
+        # detect capacity units if the user or TF indicated
+        m_cu = re.search(r"(\d+)\s*(?:capacity\s*units|cu)\b", blob)
+        if m_cu and items:
+            items[-1]["capacity_units"] = int(m_cu.group(1))
     elif re.search(r"\bload balancer\b|\blb\b", blob):
         add("azure", "lb", "Standard", qty=1)
 
@@ -202,15 +210,15 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
 # =========================
 # Azure Retail Prices — helpers
 # =========================
-_price_cache: Dict[str, Tuple[float, float]] = {}
+_price_cache: Dict[str, Tuple[Any, float]] = {}
 
-def cache_get(key: str) -> Optional[float]:
+def cache_get(key: str):
     v = _price_cache.get(key)
     if not v: return None
-    price, exp = v
-    return price if exp > time.time() else None
+    val, exp = v
+    return val if exp > time.time() else None
 
-def cache_put(key: str, value: float, ttl_sec: int = 3600):
+def cache_put(key: str, value, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
 # Region variants map (ARM code -> Retail friendly names), plus heuristics
@@ -228,13 +236,10 @@ _REGION_NAME_MAP = {
 def region_variants(region: str) -> List[str]:
     if not region: return []
     r = region.strip()
-    variants = set()
-    variants.add(r)
-    variants.add(r.lower())
+    variants = set([r, r.lower()])
     mapped = _REGION_NAME_MAP.get(r.lower())
     if mapped:
         variants.add(mapped)
-    # hyphen/space/title variants
     r_sp = r.replace("-", " ")
     variants.add(r_sp)
     variants.add(r_sp.title())
@@ -274,10 +279,6 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
 
 # ---- Robust price resolvers ----
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
-    """
-    Try several product/serviceName combinations and region-name variants to find S1/P1v3/etc.
-    Prefer hourly meters and choose lowest monthly.
-    """
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
     if c is not None:
@@ -299,7 +300,6 @@ def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
                 f"and armRegionName eq '{reg}' and retailPrice ne 0"
             )
             items = azure_retail_prices_fetch(flt, limit=60)
-
             if not items:
                 alt = (
                     f"contains(productName, 'App Service') and skuName eq '{sku}' "
@@ -326,7 +326,6 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
 
     best_price = None
     for reg in region_variants(region):
-        # VM meters often match SKU exactly (e.g., B2s), but try small variations too
         candidates = [size, size.replace("_", " "), size.replace("v", " v")]
         for sku in candidates:
             flt = (
@@ -347,8 +346,8 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
     """
-    Handle Single DB S0/S1/etc. Try serviceName, productName, meterName strategies and region variants.
-    Prefer compute meters; skip backup/storage/IO where possible.
+    Resolve SQL Database Single DB (e.g., S0/S1 or vCore SKUs) to a realistic monthly *compute* price.
+    Prefer hourly DTU/vCore/Compute meters; skip backup/storage/IO meters.
     """
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
@@ -356,34 +355,41 @@ def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
         return c
 
     best_price = None
+    bad_words = ["backup", "storage", "io", "data processed", "per gb", "gb-month"]
+    good_words = ["dtu", "vcore", "compute"]
+
+    def is_compute_meter(it):
+        meter = (it.get("meterName") or "").lower()
+        if any(b in meter for b in bad_words):
+            return False
+        return any(g in meter for g in good_words) or sku.lower() in meter
+
     for reg in region_variants(region):
         flt1 = (
             f"serviceName eq 'SQL Database' and skuName eq '{sku}' "
             f"and armRegionName eq '{reg}' and retailPrice ne 0"
         )
-        items = azure_retail_prices_fetch(flt1, limit=120)
+        items = azure_retail_prices_fetch(flt1, limit=200)
 
         if not items:
             flt2 = (
                 f"contains(productName, 'SQL Database') and skuName eq '{sku}' "
                 f"and armRegionName eq '{reg}' and retailPrice ne 0"
             )
-            items = azure_retail_prices_fetch(flt2, limit=120)
+            items = azure_retail_prices_fetch(flt2, limit=200)
 
         if not items:
             flt3 = (
                 f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') "
                 f"and armRegionName eq '{reg}' and retailPrice ne 0"
             )
-            items = azure_retail_prices_fetch(flt3, limit=120)
+            items = azure_retail_prices_fetch(flt3, limit=200)
 
         hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
         pool = hourly or items
+        pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
+
         for it in pool:
-            meter = (it.get("meterName") or "").lower()
-            # try to skip non-compute meters
-            if any(k in meter for k in ["backup", "storage", "io", "data processed"]):
-                continue
             m = monthly_from_retail(it)
             if best_price is None or (m and m < best_price):
                 best_price = m
@@ -432,25 +438,73 @@ def azure_price_for_lb(region: str) -> Optional[float]:
         cache_put(key, best)
     return best
 
-def azure_price_for_appgw_wafv2(region: str) -> Optional[float]:
-    key = f"az.appgw.wafv2.{region}"
-    c = cache_get(key)
-    if c is not None:
-        return c
-    best = None
+def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, float]]:
+    """
+    Return {'base_monthly': ..., 'capacity_unit_monthly': ...} for App Gateway WAF_v2 in a region.
+    Prefer hourly meters; choose cheapest matching row for each component.
+    """
+    key = f"az.appgw.wafv2.components.{region}"
+    cached = cache_get(key)
+    if cached:
+        return cached
+
+    best_base = None
+    best_cu = None
+
+    def is_base(it):
+        meter = (it.get("meterName") or "").lower()
+        uom = (it.get("unitOfMeasure") or "").lower()
+        if "gb" in uom:
+            return False
+        return ("gateway" in meter or "waf v2" in meter or "app gateway" in meter) and "capacity" not in meter
+
+    def is_cu(it):
+        meter = (it.get("meterName") or "").lower()
+        uom = (it.get("unitOfMeasure") or "").lower()
+        return "capacity unit" in meter and "hour" in uom
+
     for reg in region_variants(region):
         flt = (
             f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' "
-            f"and contains(skuName, 'WAF_v2') and retailPrice ne 0"
+            f"and retailPrice ne 0"
         )
-        items = azure_retail_prices_fetch(flt, limit=60)
-        for it in items:
+        items = azure_retail_prices_fetch(flt, limit=200)
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        for it in hourly:
             m = monthly_from_retail(it)
-            if best is None or (m and m < best):
-                best = m
-    if best is not None:
-        cache_put(key, best)
-    return best
+            if is_base(it):
+                if best_base is None or (m and m < best_base):
+                    best_base = m
+            elif is_cu(it):
+                if best_cu is None or (m and m < best_cu):
+                    best_cu = m
+
+        if best_base is None or best_cu is None:
+            alt = (
+                f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' "
+                f"and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(alt, limit=200)
+            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+            for it in hourly:
+                m = monthly_from_retail(it)
+                meter = (it.get("meterName") or "").lower()
+                if is_base(it):
+                    if best_base is None or (m and m < best_base):
+                        best_base = m
+                elif is_cu(it):
+                    if best_cu is None or (m and m < best_cu):
+                        best_cu = m
+
+    if best_base is None and best_cu is None:
+        return None
+
+    components = {
+        "base_monthly": round(best_base or 0.0, 2),
+        "capacity_unit_monthly": round(best_cu or 0.0, 2),
+    }
+    cache_put(key, components, ttl_sec=3600)
+    return components
 
 def azure_price_for_redis(sku: str, region: str) -> Optional[float]:
     key = f"az.redis.{region}.{sku}"
@@ -524,7 +578,14 @@ def price_items(items: List[dict]) -> dict:
                 elif service == "lb":
                     unit_monthly = azure_price_for_lb(region)
                 elif service == "app_gateway":
-                    unit_monthly = azure_price_for_appgw_wafv2(region)
+                    comps = azure_price_for_appgw_wafv2_components(region)
+                    if comps:
+                        cu = int(it.get("capacity_units") or it.get("size_gb") or DEFAULT_APPGW_CAPACITY_UNITS)
+                        unit_monthly = comps["base_monthly"] + cu * comps["capacity_unit_monthly"]
+                        if not it.get("capacity_units") and not it.get("size_gb"):
+                            notes.append(f"App Gateway capacity units defaulted to {cu}/h.")
+                    else:
+                        unit_monthly = None
                 elif service == "redis":
                     unit_monthly = azure_price_for_redis(sku, region)
                 elif service == "monitor":
@@ -547,14 +608,18 @@ def price_items(items: List[dict]) -> dict:
         monthly = round(monthly * qty, 2)
         total += monthly
 
-        out_items.append({
+        # expose capacity_units in output for app_gateway
+        out_line = {
             "cloud": cloud, "service": service, "sku": sku,
             "qty": qty, "region": region,
             "size_gb": size_gb if size_gb > 0 else None,
             "hours": hours if hours and hours != HOURS_PER_MONTH else None,
             "unit_monthly": round(unit_monthly, 2),
             "monthly": monthly
-        })
+        }
+        if service == "app_gateway":
+            out_line["capacity_units"] = int(it.get("capacity_units") or it.get("size_gb") or DEFAULT_APPGW_CAPACITY_UNITS)
+        out_items.append(out_line)
 
     return {
         "currency": currency,
