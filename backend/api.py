@@ -15,6 +15,7 @@ load_dotenv()
 
 CAL_API_KEY = os.getenv("CAL_API_KEY", "super-secret-key")
 
+# Azure OpenAI (used as the Azure MCP brain)
 AZURE_OPENAI_ENDPOINT    = (os.getenv("AZURE_OPENAI_ENDPOINT", "") or "").rstrip("/")
 AZURE_OPENAI_API_KEY     = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
@@ -37,7 +38,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="5.3.0")
+app = FastAPI(title="ArchGenie Backend", version="6.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -49,7 +50,7 @@ def health():
     return {"status": "ok", "message": "ArchGenie backend alive"}
 
 # =========================
-# Azure OpenAI (optional)
+# Azure OpenAI (MCP) client
 # =========================
 def _aoai_configured() -> bool:
     return bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY and AZURE_OPENAI_DEPLOYMENT)
@@ -85,6 +86,7 @@ def strip_fences(text: str) -> str:
     return s
 
 def extract_json_or_fences(content: str) -> Dict[str, Any]:
+    """Accepts JSON {diagram, terraform} or fenced code blocks; returns dict."""
     if not content:
         return {"diagram": "", "terraform": ""}
     try:
@@ -107,30 +109,35 @@ def sanitize_mermaid(src: str) -> str:
     """
     Harden Mermaid for strict renderers:
       - Quote subgraph titles with parentheses: subgraph "Azure (eastus)"
-      - Remove any ';' after 'subgraph' header
-      - Ensure link labels use pipes: '-. |hosts| .->'
-      - Append semicolons to node/edge lines (NOT to 'subgraph' or 'end')
-      - Remove commas in [] labels
-      - Keep 'end' on its own line
+      - Strip any ';' after subgraph header
+      - Use pipes around edge labels: '-. |hosts| .->'
+      - Append semicolons to node/edge lines only (NOT to 'subgraph' or 'end')
+      - Remove commas in [] labels; keep 'end' clean; ensure trailing newline
     """
     if not src:
         return src
     s = src
 
-    # 1) Quote titles that include parentheses
-    s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*$',
+    # Quote titles like: subgraph Azure (eastus) -> subgraph "Azure (eastus)"
+    s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
 
-    # 2) Remove any trailing ';' after subgraph header lines
-    s = re.sub(r'^(?P<hdr>\s*subgraph[^\n;]*);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
+    # Remove trailing ';' from subgraph header
+    s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
 
-    # 3) Normalize edge labels to pipes
+    # Normalize dashed edge labels to pipe form
     s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
 
-    # 4) Add semicolons to node/edge lines (but not 'subgraph' or 'end')
+    # Add semicolons to node/edge statements only
     def add_semicolon(line: str) -> str:
         raw = line.rstrip()
-        if not raw or raw.startswith("subgraph") or raw == "end":
+        if not raw:
+            return line
+        head = raw.lstrip()
+        if head.startswith("subgraph") or head == "end":
+            # strip accidental 'end;'
+            if head == "end" and raw.endswith(";"):
+                return raw[:-1] + "\n"
             return line
         if raw.endswith(";"):
             return line
@@ -139,19 +146,21 @@ def sanitize_mermaid(src: str) -> str:
         return line
     s = "".join(add_semicolon(l) for l in s.splitlines(True))
 
-    # 5) Keep 'end' on its own line
-    s = re.sub(r'(\S)\s+end\s*$', r'\1\nend', s, flags=re.MULTILINE)
+    # Clean 'end'
+    s = re.sub(r'^\s*end;?\s*$', 'end', s, flags=re.MULTILINE)
 
-    # 6) Remove commas inside [] labels (some parsers choke)
+    # Remove commas in labels inside []
     s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
 
+    if not s.endswith("\n"):
+        s += "\n"
     return s
 
 # =========================
-# Normalizer (ask/diagram/tf -> items)
+# Item normalization (ask/diagram/tf -> billable items)
 # =========================
 """
-item schema:
+Item schema (example):
 {
   "cloud": "azure",
   "service": "app_service" | "vm" | "azure_sql" | "storage" | "redis" | "lb" | "app_gateway" | "aks" | "monitor",
@@ -173,7 +182,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             d["size_gb"] = float(size_gb)
         items.append(d)
 
-    # Heuristics (extend as needed)
+    # Heuristics from text/diagram/TF
     if re.search(r"\bapp service\b|\bweb app\b", blob):
         qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
         add("azure", "app_service", "S1", qty=qty)
@@ -205,7 +214,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     if "application insights" in blob or "monitor" in blob or "log analytics" in blob:
         add("azure", "monitor", "LogAnalytics", qty=1)
 
-    # Optionally let AOAI produce normalized items too
+    # Optional: let AOAI propose items too (kept simple)
     if ask.strip() and _aoai_configured():
         try:
             system = (
@@ -238,9 +247,9 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     return list(merged.values())
 
 # =========================
-# Azure Retail Prices — cache + lookups + dynamic fetch
+# Azure Retail Prices — cache + helpers + dynamic fetch
 # =========================
-_price_cache: Dict[str, Tuple[float, float]] = {}  # key -> (price, expires_at)
+_price_cache: Dict[str, Tuple[float, float]] = {}
 
 def cache_get(key: str) -> Optional[float]:
     v = _price_cache.get(key)
@@ -474,7 +483,7 @@ def price_items(items: List[dict]) -> dict:
 # Local fallback (diagram + TF) so UI always renders
 # =========================
 def synthesize_3tier_from_prompt(app_name: str, extra: str, region: str) -> dict:
-    """Always return a minimal, valid diagram + TF for 3-tier App Service + Azure SQL."""
+    """Return a minimal, valid diagram + TF for App Service FE/BE + Azure SQL."""
     safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", app_name.lower())
     diagram = f"""graph TD
   U[User / Browser] --> FE[App Service: {app_name} Frontend];
@@ -546,50 +555,36 @@ resource "azurerm_mssql_database" "db" {{
 # =========================
 # Public Endpoints
 # =========================
-@app.post("/estimate")
-def estimate(payload: dict = Body(...), _=Depends(require_api_key)):
-    """
-    Estimate cost from:
-      - items: [{cloud, service, sku, qty, region, size_gb?, hours?}]
-      - or 'ask' (free text), 'diagram' (Mermaid), 'terraform' (HCL)
-      - default region if not given: eastus
-    """
-    items = payload.get("items")
-    region = payload.get("region") or DEFAULT_REGION
-    if not items:
-        items = normalize_to_items(
-            ask=payload.get("ask", ""),
-            diagram=payload.get("diagram", ""),
-            tf=payload.get("terraform", ""),
-            region=region,
-        )
-    estimate_obj = price_items(items)
-    return {"items": items, "estimate": estimate_obj}
-
 @app.post("/mcp/azure/diagram-tf")
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
-    Returns: { diagram: "<mermaid>", terraform: "<hcl>", cost: {...} }
-    Always returns a diagram/TF (fallback synthesis if AOAI is empty or down).
+    Generate Azure architecture (diagram + Terraform) via Azure MCP (AOAI),
+    sanitize Mermaid, and return retail-price estimate for resources detected.
+    Body:
+      {
+        "app_name": "my app name",
+        "prompt": "extra constraints like 3 tier, app service FE/BE, mssql",
+        "region": "eastus"   // optional, defaults to eastus
+      }
+    Returns: { diagram, terraform, cost }
     """
     app_name = payload.get("app_name", "3-tier web app")
     extra = payload.get("prompt") or ""
     region = payload.get("region") or DEFAULT_REGION
 
-    diagram = ""
-    tf = ""
+    diagram, tf = "", ""
 
-    # 1) Try Azure OpenAI (if configured)
+    # 1) Try Azure OpenAI (MCP style) if configured
     if _aoai_configured():
         system = (
             "You are ArchGenie's Azure MCP.\n"
-            "Return ONLY valid JSON with keys diagram and terraform. No fences.\n"
-            "diagram: Mermaid code starting with 'graph'.\n"
-            "terraform: Valid Azure HCL (RG, plan/web apps, Azure SQL)."
+            "Return ONLY valid JSON with keys diagram and terraform (no code fences).\n"
+            "diagram: Mermaid graph (start with 'graph TD' or 'graph LR').\n"
+            "terraform: Valid Azure HCL (RG, plan/web apps, Azure SQL when asked)."
         )
         user = (
             f"Create an Azure architecture for: {app_name}.\n"
-            f"Extra requirements (optional): {extra}\n"
+            f"Extra requirements: {extra}\n"
             f"Region: {region}\n"
             "Respond JSON only."
         )
@@ -603,142 +598,30 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
             diagram = strip_fences(parsed.get("diagram", "")) or ""
             tf      = strip_fences(parsed.get("terraform", "")) or ""
         except Exception:
-            diagram = ""
-            tf = ""
+            diagram, tf = "", ""
 
     # 2) Fallback if AOAI empty or not configured
     if not diagram or not tf:
         synth = synthesize_3tier_from_prompt(app_name, extra, region)
-        diagram = synth["diagram"]
-        tf = synth["terraform"]
+        diagram, tf = synth["diagram"], synth["terraform"]
 
-    # 3) Sanitize Mermaid for parser quirks (removes ';' after subgraph, etc.)
+    # 3) Sanitize Mermaid for renderer quirks
     diagram = sanitize_mermaid(diagram)
 
-    # 4) Derive billable items and estimate cost
+    # 4) Derive billable items and estimate cost (public retail prices)
     items = normalize_to_items(ask=extra or app_name, diagram=diagram, tf=tf, region=region)
     estimate_obj = price_items(items)
 
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
-# ---------- Dynamic Retail Prices (public) ----------
+# (Optional) Raw retail pricing lookup helper endpoint
 @app.post("/pricing/azure/retail")
 def pricing_azure_retail(payload: dict = Body(default={}), _=Depends(require_api_key)):
     """
     Dynamic public Retail Prices lookup (no account needed).
-
-    Body (any of the following):
-    {
-      // Option A: raw filter
-      "filter": "serviceName eq 'App Service' and skuName eq 'S1' and armRegionName eq 'eastus'",
-
-      // Option B: structured fields (we’ll build $filter for you)
-      "serviceName": "App Service",
-      "skuName": "S1",
-      "armRegionName": "eastus",
-      "meterCategory": "Compute",
-      "productName": "App Service",
-      "meterName": "Linux Plan S1",
-      "contains": { "meterName": "S1" },   // optional: contains() support
-      "excludeZero": true,                  // optional, default true
-
-      // Controls
-      "limit": 10,                          // default 50
-      "mode": "first" | "all",              // default "first"
-
-      // Optional convenience for a quick monthly:
-      "qty": 1,
-      "hours_per_month": 730
-    }
+    Pass either 'filter' (raw $filter) or structured fields to build one.
     """
     limit = int(payload.get("limit", 50))
-    mode  = payload.get("mode", "first")
-    raw   = payload.get("filter")
-    if not raw:
-        raw = build_filter_from_payload(payload)
-
+    raw   = payload.get("filter") or build_filter_from_payload(payload)
     items = azure_retail_prices_fetch(raw, limit=limit)
-    if mode == "first":
-        items = items[:1]
-
-    qty = float(payload.get("qty", 1) or 1)
-    hours = float(payload.get("hours_per_month", HOURS_PER_MONTH) or HOURS_PER_MONTH)
-
-    enriched = []
-    for it in items:
-        uom = (it.get("unitOfMeasure") or "").lower()
-        price = float(it.get("retailPrice") or 0)
-        est_monthly = None
-        if "hour" in uom:
-            est_monthly = round(price * hours * qty, 2)
-        elif "month" in uom:
-            est_monthly = round(price * qty, 2)
-        elif "gb" in uom:
-            est_monthly = round(price * qty, 2)
-
-        enriched.append({
-            "serviceName": it.get("serviceName"),
-            "productName": it.get("productName"),
-            "skuName": it.get("skuName"),
-            "meterName": it.get("meterName"),
-            "armRegionName": it.get("armRegionName"),
-            "currencyCode": it.get("currencyCode"),
-            "unitOfMeasure": it.get("unitOfMeasure"),
-            "retailPrice": price,
-            "effectiveStartDate": it.get("effectiveStartDate"),
-            "type": it.get("type"),
-            "estimatedMonthly": est_monthly
-        })
-
-    return {
-        "filter": raw,
-        "count": len(enriched),
-        "items": enriched
-    }
-
-# ----------------- AWS / GCP Mocks (diagrams + TF) -----------------
-@app.get("/mcp/aws/diagram-tf")
-def aws_mock(_=Depends(require_api_key)):
-    return {
-        "diagram": """graph TD
-  subgraph AWS
-    A[ALB] --> B[EC2: web-1];
-    B --> C[RDS: archgenie-db];
-    B --> D[S3: assets];
-  end
-""",
-        "terraform": """# mock demo
-resource "aws_instance" "web" {
-  ami           = "ami-123456"
-  instance_type = "t3.micro"
-}
-
-resource "aws_s3_bucket" "assets" {
-  bucket = "archgenie-assets"
-}
-"""
-    }
-
-@app.get("/mcp/gcp/diagram-tf")
-def gcp_mock(_=Depends(require_api_key)):
-    return {
-        "diagram": """graph TD
-  subgraph GCP
-    A[Load Balancer] --> B[Compute Engine: web-1];
-    B --> C[Cloud SQL: archgenie-db];
-    B --> D[Cloud Storage: assets];
-  end
-""",
-        "terraform": """# mock demo
-resource "google_compute_instance" "web" {
-  name         = "web-1"
-  machine_type = "e2-micro"
-  zone         = "us-central1-a"
-}
-
-resource "google_storage_bucket" "assets" {
-  name     = "archgenie-assets"
-  location = "US"
-}
-"""
-    }
+    return {"filter": raw, "count": len(items), "items": items}
