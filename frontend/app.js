@@ -1,4 +1,4 @@
-// Initialize Mermaid – we will render via mermaidAPI directly (no auto-init)
+// Mermaid init (we render manually via API)
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
 
 const el = (id) => document.getElementById(id);
@@ -16,16 +16,13 @@ const btnCopyTf    = el('btnCopyTf');
 const btnDlTf      = el('btnDlTf');
 const pricingDiv   = el('pricing');
 
-let lastSvg = '';     // store rendered SVG for download
-let lastDiagram = ''; // store mermaid text (sanitized by backend)
+let lastSvg = '';
+let lastDiagram = '';
 let lastTf = '';
 let lastCost = null;
 
-// If something upstream collapses newlines, this extra FE guard helps:
 function lastMileSanitize(diagram) {
-  // Remove any trailing ; after subgraph header (belt-and-suspenders)
   diagram = diagram.replace(/^(\s*subgraph[^\n;]*);+\s*$/gm, '$1');
-  // Ensure a newline between node end bracket and next token (fix ...]SP)
   diagram = diagram.replace(/(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))/g, '$1\n');
   return diagram;
 }
@@ -50,16 +47,14 @@ async function callAzureMcp() {
 
     const res = await fetch('/api/mcp/azure/diagram-tf', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
       body: JSON.stringify(body)
     });
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Backend error (${res.status}): ${errText}`);
+      diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(errText)}</pre>`;
+      throw new Error(`Backend error (${res.status})`);
     }
 
     const data = await res.json();
@@ -67,9 +62,7 @@ async function callAzureMcp() {
     lastTf      = (data.terraform || '').trim();
     lastCost    = data.cost || null;
 
-    // FE last-mile sanitization to prevent accidental line gluing
     const safeDiagram = lastMileSanitize(lastDiagram);
-
     await renderMermaidToSvg(safeDiagram);
     renderTerraform(lastTf);
     renderPricing(lastCost);
@@ -78,32 +71,28 @@ async function callAzureMcp() {
   } catch (e) {
     console.error(e);
     statusEl.textContent = e.message || 'Request failed.';
-    // show some context in the diagram area
-    diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(lastDiagram || '(no diagram)')}</pre>`;
+    if (!diagramHost.innerHTML) {
+      diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(lastDiagram || '(no diagram)')}</pre>`;
+    }
   } finally {
     btnGenerate.disabled = false;
   }
 }
 
 async function renderMermaidToSvg(diagramText) {
-  // Render via mermaidAPI to get SVG. We generate a unique ID to avoid collisions.
   const id = 'arch-' + Math.random().toString(36).slice(2, 9);
   try {
     const { svg } = await mermaid.render(id, diagramText);
     lastSvg = svg;
     diagramHost.innerHTML = svg;
-    // Make diagram area scrollable but full-width
     diagramHost.querySelector('svg')?.setAttribute('width', '100%');
   } catch (err) {
     console.error('Mermaid render error', err);
-    // Fallback: show raw text for debugging
     diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(diagramText)}</pre>`;
   }
 }
 
-function renderTerraform(tf) {
-  tfOut.value = tf || '';
-}
+function renderTerraform(tf) { tfOut.value = tf || ''; }
 
 function renderPricing(costObj) {
   if (!costObj || !Array.isArray(costObj.items)) {
@@ -150,34 +139,27 @@ function renderPricing(costObj) {
   `;
 }
 
-function escapeHtml(s) {
-  return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
+function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// --- Downloads ---
 btnSvg.addEventListener('click', () => {
   if (!lastSvg) return;
   const blob = new Blob([lastSvg], { type: 'image/svg+xml;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'archgenie-diagram.svg';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  a.click(); URL.revokeObjectURL(a.href);
 });
 
 btnPng.addEventListener('click', async () => {
   if (!lastSvg) return;
   const svgEl = new DOMParser().parseFromString(lastSvg, 'image/svg+xml').documentElement;
   const svgText = new XMLSerializer().serializeToString(svgEl);
-
   const canvas = document.createElement('canvas');
   const bbox = diagramHost.querySelector('svg')?.getBBox?.();
   const width = Math.max(1024, (bbox?.width || 1024));
   const height = Math.max(768, (bbox?.height || 768));
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = width; canvas.height = height;
   const ctx = canvas.getContext('2d');
-
   const img = new Image();
   img.onload = () => {
     ctx.drawImage(img, 0, 0);
@@ -186,7 +168,6 @@ btnPng.addEventListener('click', async () => {
     a.download = 'archgenie-diagram.png';
     a.click();
   };
-  img.onerror = e => console.error('PNG export failed', e);
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
 });
 
@@ -195,9 +176,7 @@ btnCopyTf.addEventListener('click', async () => {
     await navigator.clipboard.writeText(tfOut.value || '');
     btnCopyTf.textContent = 'Copied!';
     setTimeout(() => btnCopyTf.textContent = 'Copy', 1000);
-  } catch(e) {
-    console.error(e);
-  }
+  } catch(e) { console.error(e); }
 });
 
 btnDlTf.addEventListener('click', () => {
@@ -205,11 +184,7 @@ btnDlTf.addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'main.tf';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  a.click(); URL.revokeObjectURL(a.href);
 });
 
-btnGenerate.addEventListener('click', callAzureMcp);
-
-// Optional: prefill test generate
-// callAzureMcp();
+el('btnGenerate').addEventListener('click', callAzureMcp);

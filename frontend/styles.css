@@ -20,10 +20,7 @@ body {
 
 .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
 
-.hero {
-  text-align: center;
-  margin: 0 0 10px;
-}
+.hero { text-align: center; margin: 0 0 10px; }
 .logo { height: 140px; opacity: 0.92; }
 h1 { margin: 8px 0 0; font-size: 2.2rem; letter-spacing: 0.3px; }
 .sub { color: var(--muted); margin: 6px 0 0; }
@@ -31,15 +28,10 @@ h1 { margin: 8px 0 0; font-size: 2.2rem; letter-spacing: 0.3px; }
 .panel {
   background: linear-gradient(180deg, var(--card), #0b1830);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
-  margin: 14px 0 20px;
+  border-radius: 12px; padding: 16px; margin: 14px 0 20px;
 }
 
-.row {
-  display: flex; gap: 12px; align-items: center;
-  margin-bottom: 10px; flex-wrap: wrap;
-}
+.row { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .row label { min-width: 110px; color: var(--muted); }
 .row input, .row textarea, .code {
   flex: 1; min-width: 260px; color: var(--text); background: #0a162b;
@@ -58,41 +50,24 @@ button {
 button:disabled { opacity: 0.6; cursor: not-allowed; }
 .status { margin-left: 10px; color: var(--accent); }
 
-.grid {
-  display: grid; gap: 16px;
-  grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr;
-}
+.grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; }
 .card {
   background: linear-gradient(180deg, var(--card), #081529);
   border: 1px solid var(--border);
-  border-radius: 12px; padding: 12px;
-  min-height: 240px;
+  border-radius: 12px; padding: 12px; min-height: 240px;
 }
-.card-head {
-  display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;
-}
-.card h3 { margin: 6px 0; }
+.card-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
 .card .right button { margin-left: 8px; }
 .diagram-host {
   min-height: 380px; max-height: 70vh; overflow: auto;
   background: #0a1222; border: 1px dashed #274079; border-radius: 8px;
   padding: 10px;
 }
-.code {
-  width: 100%; background: #0a1222; border: 1px dashed #274079;
-  min-height: 360px; line-height: 1.35;
-}
-#pricing table {
-  width: 100%;
-  border-collapse: collapse; margin-top: 6px;
-  font-size: 14px;
-}
-#pricing th, #pricing td {
-  border-bottom: 1px solid #20345f; padding: 6px 8px; text-align: left;
-}
+.code { width: 100%; background: #0a1222; border: 1px dashed #274079; min-height: 360px; line-height: 1.35; }
+#pricing table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 14px; }
+#pricing th, #pricing td { border-bottom: 1px solid #20345f; padding: 6px 8px; text-align: left; }
 #pricing tfoot td { font-weight: 700; }
-
 .foot { text-align: center; color: #8aa7ff; margin: 20px 0 0; }
 
-/* if you ever render raw mermaid text, keep newlines */
+/* Keep newlines if you ever show raw Mermaid text */
 .mermaid { white-space: pre; }

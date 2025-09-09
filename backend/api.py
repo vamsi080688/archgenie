@@ -19,6 +19,7 @@ AZURE_OPENAI_ENDPOINT    = (os.getenv("AZURE_OPENAI_ENDPOINT", "") or "").rstrip
 AZURE_OPENAI_API_KEY     = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_OPENAI_FORCE_JSON  = os.getenv("AZURE_OPENAI_FORCE_JSON", "true").lower() == "true"
 
 USE_LIVE_AZURE_PRICES = os.getenv("USE_LIVE_AZURE_PRICES", "true").lower() == "true"
 HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
@@ -35,7 +36,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.0.0")
+app = FastAPI(title="ArchGenie Backend", version="7.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -61,6 +62,8 @@ def aoai_chat(messages: List[Dict[str, Any]], temperature: float = 0.2) -> Dict[
     )
     headers = {"Content-Type": "application/json", "api-key": AZURE_OPENAI_API_KEY}
     body = {"messages": messages, "temperature": temperature}
+    if AZURE_OPENAI_FORCE_JSON:
+        body["response_format"] = {"type": "json_object"}
     resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=90)
     if resp.status_code >= 300:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
@@ -101,18 +104,25 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
     if m: out["terraform"] = m.group(2).strip()
     return out
 
-# --- Mermaid sanitizer ---
+# =========================
+# Mermaid sanitizer
+# =========================
 def sanitize_mermaid(src: str) -> str:
+    """
+    - subgraph "Title (region)" (no trailing ';')
+    - Keep ';' at end of EDGE lines, remove it from NODE lines
+    - Normalize '-. label .->' -> '-. |label| .->'
+    - Insert newline after node ']' or ')' if followed by a token (fixes ']SP')
+    - Remove commas inside [] labels
+    - Ensure trailing newline
+    """
     if not src:
         return src
     s = src
 
-    # Quote subgraph titles with parens
     s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
-    # Remove any trailing semicolon from subgraph header
     s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
-    # Normalize dashed edge labels
     s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
 
     out_lines: List[str] = []
@@ -135,15 +145,59 @@ def sanitize_mermaid(src: str) -> str:
             out_lines.append(stripped)
     s = "\n".join(out_lines)
 
-    # Fix glued lines after node brackets
     s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
-
-    # Remove commas inside [] labels
     s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
 
     if not s.endswith("\n"):
         s += "\n"
     return s
+
+# =========================
+# Item normalization (ask/diagram/tf -> billable items)
+# =========================
+def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: Optional[str] = None) -> List[dict]:
+    region = region or DEFAULT_REGION
+    items: List[dict] = []
+    blob = f"{ask}\n{diagram}\n{tf}".lower()
+
+    def add(cloud, service, sku, qty=1, size_gb=None):
+        d = {"cloud": cloud, "service": service, "sku": sku, "qty": max(1, int(qty)), "region": region}
+        if size_gb is not None:
+            d["size_gb"] = float(size_gb)
+        items.append(d)
+
+    if re.search(r"\bapp service\b|\bweb app\b", blob):
+        qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
+        add("azure", "app_service", "S1", qty=qty)
+
+    if re.search(r"\b(mssql|azure sql|sql database)\b", blob):
+        add("azure", "azure_sql", "S0", qty=1)
+        m = re.search(r"(\d+)\s*gb", blob)
+        if m:
+            items[-1]["size_gb"] = float(m.group(1))
+
+    vm_hits = len(re.findall(r"\bvmss\b|\bvm scale set\b|\bvirtual machine\b|\bvm\b", blob))
+    if vm_hits:
+        add("azure", "vm", "B2s", qty=vm_hits)
+
+    if re.search(r"\bstorage account\b|\bblob storage\b|\bazurerm_storage", blob):
+        add("azure", "storage", "LRS", qty=1, size_gb=100)
+
+    if re.search(r"\bapplication gateway\b|\bapp gateway\b|\bapp gw\b", blob):
+        add("azure", "app_gateway", "WAF_v2", qty=1)
+    elif re.search(r"\bload balancer\b|\blb\b", blob):
+        add("azure", "lb", "Standard", qty=1)
+
+    if "redis" in blob:
+        add("azure", "redis", "C1", qty=1)
+
+    if "aks" in blob or "kubernetes service" in blob:
+        add("azure", "aks", "standard", qty=1)
+
+    if "application insights" in blob or "monitor" in blob or "log analytics" in blob:
+        add("azure", "monitor", "LogAnalytics", qty=1)
+
+    return items
 
 # =========================
 # Azure Retail Prices — cache + helpers
@@ -309,7 +363,7 @@ def price_items(items: List[dict]) -> dict:
                 elif service == "monitor":
                     unit_monthly = azure_price_for_log_analytics(region)
                 elif service == "aks":
-                    notes.append("AKS control plane is free, worker node VM cost not included.")
+                    notes.append("AKS control plane free; worker node VM costs not included.")
                     unit_monthly = 0.0
             except Exception as e:
                 notes.append(f"Lookup failed for {cloud}:{service}:{sku} in {region}: {e}")
@@ -350,7 +404,7 @@ def price_items(items: List[dict]) -> dict:
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
     Generate Azure architecture (diagram + Terraform) via Azure MCP (AOAI).
-    Always requires AOAI config. Returns sanitized diagram, terraform, and pricing.
+    Strict: no local fallback. Returns sanitized diagram, terraform, and pricing.
     """
     if not _aoai_configured():
         raise HTTPException(status_code=500, detail="Azure OpenAI not configured")
@@ -361,36 +415,50 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
 
     system = (
         "You are ArchGenie's Azure MCP.\n"
-        "Return ONLY valid JSON with keys diagram and terraform (no code fences).\n"
-        "diagram: Mermaid graph (start with 'graph TD' or 'graph LR').\n"
-        "terraform: Valid Azure HCL (Resource group, App Service Plan, Web Apps, Azure SQL, etc.)."
+        "Return ONLY a single JSON object with keys:\n"
+        '{\n'
+        '  "diagram": "Mermaid code starting with: graph TD (or graph LR)",\n'
+        '  "terraform": "Valid Terraform HCL for Azure (resource group, app service plan, web apps, sql, etc.)"\n'
+        '}\n'
+        "Do not write explanations, backticks, or any other keys. JSON only."
     )
     user = (
         f"Create an Azure architecture for: {app_name}.\n"
         f"Extra requirements: {extra}\n"
         f"Region: {region}\n"
-        "Respond JSON only."
+        "Output JSON only."
     )
 
     result = aoai_chat([
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ])
+
     try:
         content = result["choices"][0]["message"]["content"]
     except Exception:
-        raise HTTPException(status_code=500, detail="Azure OpenAI returned no content")
+        raise HTTPException(status_code=502, detail=f"AOAI returned no content. Raw: {json.dumps(result)[:500]}")
 
     parsed = extract_json_or_fences(content)
-    diagram = sanitize_mermaid(parsed.get("diagram", "") or "")
-    tf      = strip_fences(parsed.get("terraform", "") or "")
+    diagram_raw = (parsed.get("diagram") or "").strip()
+    tf_raw      = (parsed.get("terraform") or "").strip()
+
+    if not diagram_raw:
+        raise HTTPException(status_code=502, detail=f"Model did not return 'diagram'. Content: {content[:500]}")
+    if not diagram_raw.lower().startswith("graph "):
+        raise HTTPException(status_code=502, detail=f"'diagram' must start with 'graph'. Got: {diagram_raw[:120]}")
+    if not tf_raw:
+        raise HTTPException(status_code=502, detail=f"Model did not return 'terraform'. Content: {content[:500]}")
+
+    diagram = sanitize_mermaid(diagram_raw)
+    tf      = strip_fences(tf_raw)
 
     items = normalize_to_items(ask=extra or app_name, diagram=diagram, tf=tf, region=region)
     estimate_obj = price_items(items)
 
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
-# AWS/GCP mocks (no pricing)
+# ----------------- AWS / GCP Mocks -----------------
 @app.get("/mcp/aws/diagram-tf")
 def aws_mock(_=Depends(require_api_key)):
     return {
