@@ -27,9 +27,11 @@ HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
 # Default region if none provided by user
 DEFAULT_REGION = os.getenv("DEFAULT_REGION", "eastus")
 
-# App Gateway defaults (capacity units) and SQL meter filtering
-DEFAULT_APPGW_CAPACITY_UNITS = int(os.getenv("DEFAULT_APPGW_CAPACITY_UNITS", "1"))
-DEFAULT_SQL_COMPUTE_ONLY = os.getenv("DEFAULT_SQL_COMPUTE_ONLY", "true").lower() == "true"
+# App Gateway & Load Balancer defaults
+DEFAULT_APPGW_CAPACITY_UNITS = int(os.getenv("DEFAULT_APPGW_CAPACITY_UNITS", "1"))   # CU per hour
+DEFAULT_SQL_COMPUTE_ONLY     = os.getenv("DEFAULT_SQL_COMPUTE_ONLY", "true").lower() == "true"
+DEFAULT_LB_RULES             = int(os.getenv("DEFAULT_LB_RULES", "2"))               # rules per hour
+DEFAULT_LB_DATA_GB           = float(os.getenv("DEFAULT_LB_DATA_GB", "100"))         # GB processed per month
 
 # =========================
 # Auth
@@ -41,7 +43,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.4.0")
+app = FastAPI(title="ArchGenie Backend", version="7.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -115,16 +117,14 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
 def sanitize_mermaid(src: str) -> str:
     """
     - subgraph "Title (region)" (no trailing ';')
-    - Keep ';' at end of EDGE lines, remove it from NODE lines
-    - Normalize '-. label .->' -> '-. |label| .->'
-    - Insert newline after node ']' or ')' if followed by a token (fixes ']SP')
+    - Edge lines end with ';', node lines do not
+    - '-. label .->' -> '-. |label| .->'
+    - Insert newline after node ']' or ')' if followed by token (fixes ']SP')
     - Remove commas inside [] labels
-    - Ensure trailing newline
     """
     if not src:
         return src
     s = src
-
     s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
     s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
@@ -189,12 +189,17 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
 
     if re.search(r"\bapplication gateway\b|\bapp gateway\b|\bapp gw\b", blob):
         add("azure", "app_gateway", "WAF_v2", qty=1)
-        # detect capacity units if the user or TF indicated
         m_cu = re.search(r"(\d+)\s*(?:capacity\s*units|cu)\b", blob)
         if m_cu and items:
             items[-1]["capacity_units"] = int(m_cu.group(1))
     elif re.search(r"\bload balancer\b|\blb\b", blob):
         add("azure", "lb", "Standard", qty=1)
+        m_rules = re.search(r"(\d+)\s*(?:rules|lb\s*rules)", blob)
+        m_data  = re.search(r"(\d+)\s*gb\s*(?:data|processed)", blob)
+        if m_rules and items:
+            items[-1]["rules"] = int(m_rules.group(1))
+        if m_data and items:
+            items[-1]["data_gb"] = float(m_data.group(1))
 
     if "redis" in blob:
         add("azure", "redis", "C1", qty=1)
@@ -221,7 +226,7 @@ def cache_get(key: str):
 def cache_put(key: str, value, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
-# Region variants map (ARM code -> Retail friendly names), plus heuristics
+# Region variants map (ARM code -> Retail friendly names)
 _REGION_NAME_MAP = {
     "eastus": "US East",
     "eastus2": "US East 2",
@@ -346,7 +351,7 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
     """
-    Resolve SQL Database Single DB (e.g., S0/S1 or vCore SKUs) to a realistic monthly *compute* price.
+    Resolve SQL Database Single DB (e.g., S0/S1/vCore) to a realistic monthly *compute* price.
     Prefer hourly DTU/vCore/Compute meters; skip backup/storage/IO meters.
     """
     key = f"az.sql.{region}.{sku}"
@@ -411,32 +416,87 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
         )
         items = azure_retail_prices_fetch(flt, limit=80)
         for it in items:
-            m = monthly_from_retail(it)  # usually per GB-month
+            m = monthly_from_retail(it)  # per GB-month
             if best is None or (m and m < best):
                 best = m
     if best is not None:
         cache_put(key, best)
     return best
 
-def azure_price_for_lb(region: str) -> Optional[float]:
-    key = f"az.lb.standard.{region}"
-    c = cache_get(key)
-    if c is not None:
-        return c
-    best = None
+def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
+    """
+    Resolve Standard Load Balancer component prices for a region.
+    Returns:
+      {
+        "rule_hour_monthly": $/rule/month   (from hourly "Rule" meters),
+        "data_gb_monthly":   $/GB/month     (from "Data Processed" meters)
+      }
+    """
+    key = f"az.lb.standard.components.{region}"
+    cached = cache_get(key)
+    if cached:
+        return cached
+
+    best_rule = None
+    best_data = None
+
+    def is_rule_meter(it):
+        meter = (it.get("meterName") or "").lower()
+        uom = (it.get("unitOfMeasure") or "").lower()
+        return "rule" in meter and "hour" in uom
+
+    def is_data_meter(it):
+        meter = (it.get("meterName") or "").lower()
+        uom = (it.get("unitOfMeasure") or "").lower()
+        return ("data" in meter or "processed" in meter or "data path" in meter) and ("gb" in uom)
+
     for reg in region_variants(region):
         flt = (
             f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' "
-            f"and contains(skuName, 'Standard') and retailPrice ne 0"
+            f"and retailPrice ne 0"
         )
-        items = azure_retail_prices_fetch(flt, limit=60)
+        items = azure_retail_prices_fetch(flt, limit=200)
+
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        for it in hourly:
+            if is_rule_meter(it):
+                m = monthly_from_retail(it)
+                if best_rule is None or (m and m < best_rule):
+                    best_rule = m
+
         for it in items:
-            m = monthly_from_retail(it)
-            if best is None or (m and m < best):
-                best = m
-    if best is not None:
-        cache_put(key, best)
-    return best
+            if is_data_meter(it):
+                m = monthly_from_retail(it)  # per GB-month
+                if best_data is None or (m and m < best_data):
+                    best_data = m
+
+        if best_rule is None or best_data is None:
+            alt = (
+                f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' "
+                f"and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(alt, limit=200)
+            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+            for it in hourly:
+                if is_rule_meter(it):
+                    m = monthly_from_retail(it)
+                    if best_rule is None or (m and m < best_rule):
+                        best_rule = m
+            for it in items:
+                if is_data_meter(it):
+                    m = monthly_from_retail(it)
+                    if best_data is None or (m and m < best_data):
+                        best_data = m
+
+    if best_rule is None and best_data is None:
+        return None
+
+    comps = {
+        "rule_hour_monthly": round(best_rule or 0.0, 4),
+        "data_gb_monthly": round(best_data or 0.0, 4),
+    }
+    cache_put(key, comps, ttl_sec=3600)
+    return comps
 
 def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, float]]:
     """
@@ -488,7 +548,6 @@ def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, fl
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
                 m = monthly_from_retail(it)
-                meter = (it.get("meterName") or "").lower()
                 if is_base(it):
                     if best_base is None or (m and m < best_base):
                         best_base = m
@@ -576,7 +635,17 @@ def price_items(items: List[dict]) -> dict:
                     if per_gb is not None:
                         unit_monthly = per_gb * (size_gb if size_gb > 0 else 100.0)
                 elif service == "lb":
-                    unit_monthly = azure_price_for_lb(region)
+                    comps = azure_price_for_lb_components(region)
+                    if comps:
+                        rules = int(it.get("rules") or DEFAULT_LB_RULES)
+                        data_gb = float(it.get("data_gb") or DEFAULT_LB_DATA_GB)
+                        unit_monthly = (rules * comps["rule_hour_monthly"]) + (data_gb * comps["data_gb_monthly"])
+                        if not it.get("rules"):
+                            notes.append(f"LB rules defaulted to {rules}/h.")
+                        if not it.get("data_gb"):
+                            notes.append(f"LB data processed defaulted to {data_gb} GB/mo.")
+                    else:
+                        unit_monthly = None
                 elif service == "app_gateway":
                     comps = azure_price_for_appgw_wafv2_components(region)
                     if comps:
@@ -608,7 +677,6 @@ def price_items(items: List[dict]) -> dict:
         monthly = round(monthly * qty, 2)
         total += monthly
 
-        # expose capacity_units in output for app_gateway
         out_line = {
             "cloud": cloud, "service": service, "sku": sku,
             "qty": qty, "region": region,
@@ -619,6 +687,9 @@ def price_items(items: List[dict]) -> dict:
         }
         if service == "app_gateway":
             out_line["capacity_units"] = int(it.get("capacity_units") or it.get("size_gb") or DEFAULT_APPGW_CAPACITY_UNITS)
+        if service == "lb":
+            out_line["rules"] = int(it.get("rules") or DEFAULT_LB_RULES)
+            out_line["data_gb"] = float(it.get("data_gb") or DEFAULT_LB_DATA_GB)
         out_items.append(out_line)
 
     return {
