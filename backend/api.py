@@ -115,44 +115,75 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
     return out
 
 # =========================
-# Mermaid sanitizer
+# Mermaid sanitizer (defensive for Mermaid 10.9.x)
 # =========================
 def sanitize_mermaid(src: str) -> str:
     """
-    - subgraph "Title (region)" (no trailing ';')
-    - Edge lines end with ';', node lines do not
+    Make LLM output parseable:
+    - Ensure leading 'graph TD/LR'
+    - Normalize subgraph lines: subgraph Azure (eastus); -> subgraph "Azure (eastus)"
+    - Node lines no ';', edge lines end with ';'
     - '-. label .->' -> '-. |label| .->'
-    - Insert newline after node ']' or ')' if followed by token (fixes ']SP')
-    - Remove commas inside [] labels
+    - insert newline after ']' or ')' when followed by node id
+    - remove commas inside [labels]
+    - close unmatched subgraphs
     """
     if not src:
-        return src
-    s = src
-    s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
-               r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
-    s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
-    s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
+        return "graph TD\nA[Empty]\n"
 
-    out_lines: List[str] = []
+    s = src.strip().replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"^```(?:mermaid)?\s*\n", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\n```$", "", s)
+
+    if not re.match(r"^graph\s+(TD|LR)\b", s.strip(), flags=re.IGNORECASE):
+        s = "graph TD\n" + s
+
+    def _fix_subgraph_header(m):
+        body = m.group(1).strip()
+        if body.startswith('"') and body.endswith('"'):
+            return f'subgraph {body}'
+        return f'subgraph "{body}"'
+    s = re.sub(r'^\s*subgraph\s+([^\n;]+)\s*;?\s*$', _fix_subgraph_header, s, flags=re.MULTILINE)
+
+    cleaned = []
     for line in s.splitlines():
-        stripped = line.rstrip().strip()
-        if not stripped:
-            out_lines.append("")
+        t = line.strip()
+        if not t:
+            cleaned.append("")
             continue
-        if stripped.startswith("subgraph") or stripped == "end":
-            out_lines.append(stripped)
-            continue
-        is_edge = ("--" in stripped) or (".->" in stripped) or ("---" in stripped)
-        if is_edge:
-            if not stripped.endswith(";"):
-                stripped += ";"
-            out_lines.append(stripped)
-        else:
-            out_lines.append(stripped.rstrip(";"))
-    s = "\n".join(out_lines)
 
-    s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
-    s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
+        t = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.->', r'-. |\1| .->', t)
+
+        is_subgraph = t.startswith("subgraph")
+        is_end = t == "end"
+        is_edge = (("--" in t) or (".->" in t) or ("---" in t))
+
+        if is_subgraph:
+            cleaned.append(t.rstrip(";"))
+            continue
+        if is_end:
+            cleaned.append("end")
+            continue
+
+        def _zap_commas(m):
+            return "[" + m.group(1).replace(",", "") + "]"
+        t = re.sub(r'\[(.*?)\]', _zap_commas, t)
+
+        if is_edge:
+            if not t.endswith(";"):
+                t += ";"
+            cleaned.append(t)
+        else:
+            cleaned.append(t.rstrip(";"))
+
+    s = "\n".join(cleaned)
+    s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+(?:\[|\(|-|\.))', r'\1\n', s)
+    s = s.replace(";;", ";").replace("`", "")
+
+    open_count = len(re.findall(r'^\s*subgraph\b', s, flags=re.MULTILINE))
+    close_count = len(re.findall(r'^\s*end\s*$', s, flags=re.MULTILINE))
+    if close_count < open_count:
+        s += "\n" + "\n".join(["end"] * (open_count - close_count))
 
     if not s.endswith("\n"):
         s += "\n"
@@ -172,7 +203,6 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             d["size_gb"] = float(size_gb)
         items.append(d)
 
-    # Heuristics
     if re.search(r"\bapp service\b|\bweb app\b", blob):
         qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
         add("azure", "app_service", "S1", qty=qty)
@@ -284,7 +314,7 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
         return round(price * HOURS_PER_MONTH, 2)
     return round(price, 2)
 
-# ---- Robust price resolvers ----
+# ---- price resolvers ----
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
@@ -349,10 +379,6 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
     return best_price
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
-    """
-    Resolve SQL Database Single DB (e.g., S0/S1/vCore) to a realistic monthly *compute* price.
-    Prefer hourly DTU/vCore/Compute meters; skip backup/storage/IO meters.
-    """
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
     if c is not None:
@@ -369,34 +395,19 @@ def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
         return any(g in meter for g in good_words) or sku.lower() in meter
 
     for reg in region_variants(region):
-        flt1 = (
-            f"serviceName eq 'SQL Database' and skuName eq '{sku}' "
-            f"and armRegionName eq '{reg}' and retailPrice ne 0"
-        )
-        items = azure_retail_prices_fetch(flt1, limit=200)
-
-        if not items:
-            flt2 = (
-                f"contains(productName, 'SQL Database') and skuName eq '{sku}' "
-                f"and armRegionName eq '{reg}' and retailPrice ne 0"
-            )
-            items = azure_retail_prices_fetch(flt2, limit=200)
-
-        if not items:
-            flt3 = (
-                f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') "
-                f"and armRegionName eq '{reg}' and retailPrice ne 0"
-            )
-            items = azure_retail_prices_fetch(flt3, limit=200)
-
-        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
-        pool = hourly or items
-        pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
-
-        for it in pool:
-            m = monthly_from_retail(it)
-            if best_price is None or (m and m < best_price):
-                best_price = m
+        for flt in [
+            f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
+            f"contains(productName, 'SQL Database') and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
+            f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') and armRegionName eq '{reg}' and retailPrice ne 0",
+        ]:
+            items = azure_retail_prices_fetch(flt, limit=200)
+            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+            pool = hourly or items
+            pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
+            for it in pool:
+                m = monthly_from_retail(it)
+                if best_price is None or (m and m < best_price):
+                    best_price = m
 
     if best_price is not None:
         cache_put(key, best_price)
@@ -423,14 +434,6 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     return best
 
 def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
-    """
-    Resolve Standard Load Balancer component prices for a region.
-    Returns:
-      {
-        "rule_hour_monthly": $/rule/month   (from hourly "Rule" meters),
-        "data_gb_monthly":   $/GB/month     (from "Data Processed" meters)
-      }
-    """
     key = f"az.lb.standard.components.{region}"
     cached = cache_get(key)
     if cached:
@@ -450,31 +453,11 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
         return ("data" in meter or "processed" in meter or "data path" in meter) and ("gb" in uom)
 
     for reg in region_variants(region):
-        flt = (
-            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' "
-            f"and retailPrice ne 0"
-        )
-        items = azure_retail_prices_fetch(flt, limit=200)
-
-        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
-        for it in hourly:
-            if is_rule_meter(it):
-                m = monthly_from_retail(it)
-                if best_rule is None or (m and m < best_rule):
-                    best_rule = m
-
-        for it in items:
-            if is_data_meter(it):
-                m = monthly_from_retail(it)  # per GB-month
-                if best_data is None or (m and m < best_data):
-                    best_data = m
-
-        if best_rule is None or best_data is None:
-            alt = (
-                f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' "
-                f"and retailPrice ne 0"
-            )
-            items = azure_retail_prices_fetch(alt, limit=200)
+        for flt in [
+            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' and retailPrice ne 0",
+            f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' and retailPrice ne 0",
+        ]:
+            items = azure_retail_prices_fetch(flt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
                 if is_rule_meter(it):
@@ -498,10 +481,6 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
     return comps
 
 def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, float]]:
-    """
-    Return {'base_monthly': ..., 'capacity_unit_monthly': ...} for App Gateway WAF_v2 in a region.
-    Prefer hourly meters; choose cheapest matching row for each component.
-    """
     key = f"az.appgw.wafv2.components.{region}"
     cached = cache_get(key)
     if cached:
@@ -523,27 +502,11 @@ def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, fl
         return "capacity unit" in meter and "hour" in uom
 
     for reg in region_variants(region):
-        flt = (
-            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' "
-            f"and retailPrice ne 0"
-        )
-        items = azure_retail_prices_fetch(flt, limit=200)
-        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
-        for it in hourly:
-            m = monthly_from_retail(it)
-            if is_base(it):
-                if best_base is None or (m and m < best_base):
-                    best_base = m
-            elif is_cu(it):
-                if best_cu is None or (m and m < best_cu):
-                    best_cu = m
-
-        if best_base is None or best_cu is None:
-            alt = (
-                f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' "
-                f"and retailPrice ne 0"
-            )
-            items = azure_retail_prices_fetch(alt, limit=200)
+        for flt in [
+            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' and retailPrice ne 0",
+            f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' and retailPrice ne 0",
+        ]:
+            items = azure_retail_prices_fetch(flt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
                 m = monthly_from_retail(it)
@@ -833,12 +796,6 @@ def pricing_debug(
     filter: Optional[str] = Query(None, description="Raw $filter override for 'raw' kind"),
     _=Depends(require_api_key),
 ):
-    """
-    Inspect matched retail rows.
-    - appservice/sql require ?sku=...
-    - lb/appgw ignore sku
-    - raw uses ?filter=... directly
-    """
     try:
         if kind == "appservice":
             if not sku: raise HTTPException(400, "sku required")
