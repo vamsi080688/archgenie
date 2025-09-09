@@ -1,203 +1,83 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>ArchGenie</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-  <style>
-    :root { --bg:#0f172a; --card:#111827; --acc:#2563eb; --text:#e5e7eb; --muted:#9ca3af; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --radius:16px; --shadow:0 10px 30px rgba(0,0,0,0.35); }
-    *{box-sizing:border-box} body{margin:0;background:radial-gradient(1200px 800px at 20% 0%, #111827, #0b1224 60%, #060b17 100%), var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column}
-    header{padding:28px 24px;display:flex;justify-content:space-between;align-items:center}
-    .brand{display:flex;gap:14px;align-items:center}.brand img{height:40px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.4))}.brand h1{margin:0;font-size:1.4rem;letter-spacing:.4px}
-    .pill{padding:6px 10px;border-radius:999px;background:rgba(37,99,235,.15);border:1px solid rgba(37,99,235,.35);color:#cfe1ff;font-size:.9rem}
-    main{width:100%;max-width:1200px;margin:0 auto 64px;padding:0 20px;display:grid;gap:20px;grid-template-columns:1.2fr 1fr}
-    .card{background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0) 60%), rgba(17,24,39,.7);border:1px solid rgba(255,255,255,.07);border-radius:var(--radius);box-shadow:var(--shadow);backdrop-filter:blur(6px)}
-    .card header{padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center}
-    .card header h2{margin:0;font-size:1.05rem;color:#dbeafe}.content{padding:16px 18px}.row{display:grid;gap:12px}.row.cols-2{grid-template-columns:1fr 1fr}.row.cols-3{grid-template-columns:1fr 1fr 1fr}
-    textarea,input,select,button{width:100%;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(2,6,23,.6);color:var(--text);padding:10px 12px;outline:none;transition:border .15s,box-shadow .15s,transform .02s}
-    textarea:focus,input:focus,select:focus{border-color:rgba(37,99,235,.65);box-shadow:0 0 0 3px rgba(37,99,235,.25)} textarea{min-height:120px;resize:vertical}
-    button.primary{background:linear-gradient(180deg,#3b82f6,#2563eb);border:none;cursor:pointer;font-weight:600}
-    button.secondary{background:rgba(37,99,235,.18);border:1px solid rgba(37,99,235,.45);cursor:pointer;font-weight:600}
-    button:active{transform:translateY(1px)} .actions{display:flex;gap:10px;flex-wrap:wrap}
-    .mermaid-box{background:#0b1220;border-radius:12px;padding:8px;border:1px solid rgba(255,255,255,.06);overflow:auto;min-height:160px}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:.9rem}.muted{color:var(--muted)} .ok{color:var(--ok)} .err{color:var(--err)}
-    table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06)} th{text-align:left;color:#cbd5e1;font-weight:600} tfoot td{font-weight:700}
-    .footer{text-align:center;color:var(--muted);padding-bottom:32px}
-  </style>
-  <script>mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });</script>
-</head>
-<body>
-  <header>
-    <div class="brand">
-      <img src="logo.png" alt="ArchGenie" /><h1>ArchGenie</h1><span class="pill">Azure MCP + Live Pricing</span>
-    </div>
-    <div class="muted">status: <span id="status" class="ok">ready</span></div>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <title>ArchGenie</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="./styles.css" rel="stylesheet" />
+    <script src="https://unpkg.com/mermaid@10/dist/mermaid.min.js"></script>
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hero">
+        <img src="logo.png" alt="ArchGenie Logo" class="logo" />
+        <h1>ArchGenie</h1>
+        <p>AI-powered Architecture Generator</p>
+        <p class="sub">Frontend served by Nginx, backend proxied at <code>/api</code></p>
+      </header>
 
-  <main>
-    <section class="card">
-      <header><h2>Design Prompt</h2></header>
-      <div class="content">
-        <div class="row cols-2">
-          <div><label class="muted">App Name</label><input id="appName" value="secure Azure 3-tier web app"/></div>
-          <div><label class="muted">Region</label><input id="region" value="eastus"/></div>
+      <section class="panel">
+        <div class="row">
+          <label>App Name</label>
+          <input id="appName" type="text" value="secure Azure 3-tier web app" />
         </div>
         <div class="row">
-          <label class="muted">Extra Requirements</label>
-          <textarea id="prompt" placeholder="frontend/backend as App Service; MSSQL; RBAC to SQL"></textarea>
+          <label>Prompt</label>
+          <textarea id="prompt" rows="3" placeholder="e.g. frontend & backend as App Service, use MSSQL database"></textarea>
         </div>
-        <div class="row cols-3">
-          <div><label class="muted">App GW Capacity Units (CU/h)</label><input id="appgwCu" type="number" min="0" step="1" placeholder="default 1"/></div>
-          <div><label class="muted">LB Rules (rules/h)</label><input id="lbRules" type="number" min="0" step="1" placeholder="default 2"/></div>
-          <div><label class="muted">LB Data (GB/mo)</label><input id="lbData" type="number" min="0" step="50" placeholder="default 100"/></div>
+        <div class="row">
+          <div class="col">
+            <label>Region (optional)</label>
+            <input id="region" type="text" placeholder="eastus (defaults in backend)" />
+          </div>
+          <div class="col">
+            <label>API Key (x-api-key)</label>
+            <input id="apiKey" type="password" placeholder="super-secret-key" />
+          </div>
         </div>
-        <div class="actions" style="margin-top:12px;">
-          <button class="primary" id="btnGenerate">Generate with Azure MCP</button>
-          <button class="secondary" id="btnReprice">Re-Price</button>
-          <button class="secondary" id="btnBundle">Download Bundle (zip)</button>
+        <div class="row actions">
+          <button id="btnGenerate">Generate with Azure MCP</button>
+          <span id="status" class="status"></span>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="card">
-      <header><h2>Architecture Diagram</h2></header>
-      <div class="content">
-        <div id="diagramContainer" class="mermaid-box"><div class="muted">No diagram yet.</div></div>
-        <details style="margin-top:8px;"><summary class="muted">Show sanitized Mermaid</summary>
-          <pre id="rawMermaid" class="mono muted" style="white-space:pre-wrap"></pre>
-        </details>
-      </div>
-    </section>
-
-    <section class="card">
-      <header><h2>Terraform</h2></header>
-      <div class="content">
-        <textarea id="tf" class="mono" placeholder="main.tf will appear here"></textarea>
-      </div>
-    </section>
-
-    <section class="card">
-      <header><h2>Estimated Monthly Cost</h2></header>
-      <div class="content">
-        <div id="costTable" class="muted">No estimate yet.</div>
-        <div class="actions" style="margin-top:10px;">
-          <button class="secondary" id="btnDebug">Pricing Debug</button>
+      <section class="grid">
+        <div class="card">
+          <div class="card-head">
+            <h3>Architecture Diagram</h3>
+            <div class="right">
+              <button id="btnSvg">Download SVG</button>
+              <button id="btnPng">Download PNG</button>
+            </div>
+          </div>
+          <div id="diagramHost" class="diagram-host"></div>
         </div>
-        <pre id="debugOut" class="mono muted" style="white-space:pre-wrap;margin-top:10px;max-height:240px;overflow:auto;"></pre>
-      </div>
-    </section>
-  </main>
 
-  <div class="footer">© ArchGenie</div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Terraform</h3>
+            <div class="right">
+              <button id="btnCopyTf">Copy</button>
+              <button id="btnDlTf">Download .tf</button>
+            </div>
+          </div>
+          <textarea id="tfOut" class="code" rows="16" spellcheck="false"></textarea>
+        </div>
 
-  <script>
-    const API = (p)=> `/api${p}`;
-    const API_KEY = localStorage.getItem('archgenie_key') || 'super-secret-key';
-    let lastDiagram = '', lastCost=null;
+        <div class="card">
+          <div class="card-head">
+            <h3>Estimated Monthly Cost</h3>
+            <div class="right"></div>
+          </div>
+          <div id="pricing"></div>
+        </div>
+      </section>
 
-    function headers(json=true){ const h={'x-api-key':API_KEY}; if(json) h['Content-Type']='application/json'; return h; }
-    function showStatus(msg,cls='ok'){ const s=document.getElementById('status'); s.textContent=msg; s.className=cls; }
+      <footer class="foot">
+        <small>© ArchGenie</small>
+      </footer>
+    </main>
 
-    // Client-side fallback sanitizer (mirrors backend)
-    function cleanMermaid(text){
-      if(!text) return 'graph TD\nA[Empty]';
-      let s = text.trim().replace(/\r\n/g,'\n').replace(/\r/g,'\n');
-      s = s.replace(/^```(?:mermaid)?\s*\n/i,'').replace(/\n```$/,'');
-      if(!/^graph\s+(TD|LR)\b/i.test(s)) s = 'graph TD\n' + s;
-      s = s.replace(/^\s*subgraph\s+([^\n;]+)\s*;?\s*$/gm,(m,p)=>`subgraph "${p.trim()}"`);
-      s = s.replace(/-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.->/g,'-. |$1| .->');
-      s = s.split('\n').map(l=>{
-        let t=l.trim(); if(!t) return '';
-        const isSub = t.startsWith('subgraph'); const isEnd = t==='end';
-        const isEdge = t.includes('--')||t.includes('.->')||t.includes('---');
-        if(isSub) return t.replace(/;+\s*$/,'');
-        if(isEnd) return 'end';
-        t = t.replace(/\[(.*?)\]/g,(m,a)=>'['+a.replace(/,/g,'')+']');
-        if(isEdge && !t.endsWith(';')) t += ';';
-        if(!isEdge) t = t.replace(/;+\s*$/,'');
-        return t;
-      }).join('\n');
-      s = s.replace(/(\]|\))\s*(?=[A-Za-z0-9_]+(?:\[|\(|-|\.))/g,'$1\n').replace(/;;+/g,';').replace(/`/g,'');
-      const opens=(s.match(/^\s*subgraph\b/mg)||[]).length, ends=(s.match(/^\s*end\s*$/mg)||[]).length;
-      if(ends<opens) s += '\n' + 'end\n'.repeat(opens-ends);
-      return s.endsWith('\n')?s:s+'\n';
-    }
-
-    function renderCost(cost){
-      if(!cost||!cost.items||!cost.items.length) return '<div class="muted">No items</div>';
-      const rows = cost.items.map(it=>{
-        const sz = it.size_gb?`${it.size_gb} GB`:''; const hrs=it.hours?it.hours:'';
-        const extra=[]; if(it.capacity_units!==undefined)extra.push(`CU=${it.capacity_units}`);
-        if(it.rules!==undefined)extra.push(`rules=${it.rules}`); if(it.data_gb!==undefined)extra.push(`data=${it.data_gb} GB`);
-        const extraText=extra.length?`<div class="muted" style="font-size:.85rem">${extra.join(' • ')}</div>`:'';
-        return `<tr><td>${it.cloud}</td><td>${it.service}</td><td>${it.sku}</td><td>${it.region}</td>
-          <td>${it.qty}</td><td>${sz}</td><td>${hrs}</td><td>$${it.unit_monthly.toFixed(2)}</td><td>$${it.monthly.toFixed(2)}</td></tr>
-          ${extraText?`<tr><td colspan="9">${extraText}</td></tr>`:''}`;
-      }).join('');
-      const notes=(cost.notes||[]).map(n=>`<li>${n}</li>`).join('')||'<li class="muted">—</li>';
-      return `<table><thead><tr><th>Cloud</th><th>Service</th><th>SKU</th><th>Region</th><th>Qty</th><th>Size</th><th>Hours</th><th>Unit/Month</th><th>Monthly</th></tr></thead>
-        <tbody>${rows}</tbody><tfoot><tr><td colspan="8">Total (${cost.currency})</td><td>$${cost.total_estimate.toFixed(2)}</td></tr></tfoot></table>
-        <div style="margin-top:8px"><b>Notes:</b><ul>${notes}</ul></div>`;
-    }
-
-    async function callAzureMcp(useOverrides=true){
-      showStatus('generating…');
-      const appName=document.getElementById('appName').value.trim();
-      const region=(document.getElementById('region').value||'eastus').trim();
-      const prompt=document.getElementById('prompt').value.trim();
-      const overrides={};
-      if(useOverrides){
-        const cu=document.getElementById('appgwCu').value, r=document.getElementById('lbRules').value, d=document.getElementById('lbData').value;
-        if(cu) overrides.appgw_capacity_units=parseInt(cu,10);
-        if(r) overrides.lb_rules=parseInt(r,10);
-        if(d) overrides.lb_data_gb=parseFloat(d);
-      }
-      const res=await fetch(API('/mcp/azure/diagram-tf'),{method:'POST',headers:headers(),body:JSON.stringify({app_name:appName,prompt,region,overrides})});
-      if(!res.ok){ showStatus('error','err'); alert('Azure MCP error:\n'+await res.text()); return; }
-      const dataOut=await res.json();
-
-      const dRaw=dataOut.diagram||'graph TD\nA[No diagram]';
-      const d=cleanMermaid(dRaw);
-      lastDiagram=d;
-      document.getElementById('rawMermaid').textContent=d;
-      const container=document.getElementById('diagramContainer');
-      container.innerHTML=`<div class="mermaid">${d}</div>`;
-      try{
-        mermaid.parse(d);                // show precise parse errors if any
-        await mermaid.run({nodes:[container]});
-      }catch(e){
-        container.innerHTML=`<div class="muted err">Mermaid parse error: ${e.str || e.message}</div><pre class="mono muted" style="white-space:pre-wrap;margin-top:8px">${d}</pre>`;
-      }
-
-      document.getElementById('tf').value=dataOut.terraform||'';
-      lastCost=dataOut.cost||null;
-      document.getElementById('costTable').innerHTML=renderCost(lastCost);
-      showStatus('ready');
-    }
-
-    async function reprice(){ if(!lastDiagram){ alert('Generate first.'); return; } await callAzureMcp(true); }
-
-    async function bundle(){
-      const tf=document.getElementById('tf').value||'';
-      if(!lastDiagram && !tf && !lastCost){ alert('Nothing to bundle yet.'); return; }
-      const res=await fetch(API('/bundle'),{method:'POST',headers:headers(),body:JSON.stringify({diagram:lastDiagram,terraform:tf,cost:lastCost||{}})});
-      if(!res.ok){ alert('Bundle failed'); return; }
-      const blob=await res.blob(), url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='archgenie-bundle.zip'; a.click(); URL.revokeObjectURL(url);
-    }
-
-    async function debugPricing(){
-      const region=(document.getElementById('region').value||'eastus').trim();
-      const parts=[]; async function one(kind,extra=''){const r=await fetch(API(`/pricing/debug?kind=${kind}&region=${encodeURIComponent(region)}${extra}`),{headers:headers(false)}); if(!r.ok){parts.push(`-- ${kind}: error ${r.status}`);return;}
-        const j=await r.json(); parts.push(`-- ${kind.toUpperCase()} (${j.length} rows, top 8):\n`+JSON.stringify(j.slice(0,8).map(x=>({meterName:x.meterName,unit:x.unitOfMeasure,price:x.retailPrice,skuName:x.skuName,productName:x.productName})),null,2));}
-      await one('appservice','&sku=S1'); await one('sql','&sku=S0'); await one('lb'); await one('appgw');
-      document.getElementById('debugOut').textContent=parts.join('\n\n');
-    }
-
-    document.getElementById('btnGenerate').addEventListener('click',()=>callAzureMcp(true));
-    document.getElementById('btnReprice').addEventListener('click',reprice);
-    document.getElementById('btnBundle').addEventListener('click',bundle);
-    document.getElementById('btnDebug').addEventListener('click',debugPricing);
-  </script>
-</body>
+    <script src="./app.js"></script>
+  </body>
 </html>
