@@ -1,11 +1,14 @@
 import os
 import re
+import io
 import json
 import time
+import zipfile
 import requests
 from typing import List, Dict, Any, Tuple, Optional
-from fastapi import FastAPI, Depends, Header, HTTPException, Body
+from fastapi import FastAPI, Depends, Header, HTTPException, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 
 # =========================
@@ -43,7 +46,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.6.0")
+app = FastAPI(title="ArchGenie Backend", version="7.7.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -226,7 +229,6 @@ def cache_get(key: str):
 def cache_put(key: str, value, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
-# Region variants map (ARM code -> Retail friendly names)
 _REGION_NAME_MAP = {
     "eastus": "US East",
     "eastus2": "US East 2",
@@ -290,11 +292,8 @@ def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
         return c
 
     service_candidates = [
-        "App Service",
-        "App Service Linux",
-        "Azure App Service",
-        "App Service Plans",
-        "Azure App Service Plans",
+        "App Service", "App Service Linux", "Azure App Service",
+        "App Service Plans", "Azure App Service Plans",
     ]
 
     best_price = None
@@ -707,7 +706,8 @@ def price_items(items: List[dict]) -> dict:
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
     Generate Azure architecture (diagram + Terraform) via Azure MCP (AOAI).
-    Strict: no local fallback. Returns sanitized diagram, terraform, and pricing.
+    Returns sanitized diagram, terraform, and pricing.
+    Supports overrides: appgw_capacity_units, lb_rules, lb_data_gb.
     """
     if not _aoai_configured():
         raise HTTPException(status_code=500, detail="Azure OpenAI not configured")
@@ -715,6 +715,11 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     app_name = payload.get("app_name", "3-tier web app")
     extra = payload.get("prompt") or ""
     region = payload.get("region") or DEFAULT_REGION
+
+    overrides = payload.get("overrides") or {}
+    appgw_capacity_units = overrides.get("appgw_capacity_units")
+    lb_rules = overrides.get("lb_rules")
+    lb_data_gb = overrides.get("lb_data_gb")
 
     system = (
         "You are ArchGenie's Azure MCP.\n"
@@ -756,9 +761,18 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     diagram = sanitize_mermaid(diagram_raw)
     tf      = strip_fences(tf_raw)
 
+    # build items, then apply overrides if present
     items = normalize_to_items(ask=extra or app_name, diagram=diagram, tf=tf, region=region)
-    estimate_obj = price_items(items)
+    for it in items:
+        if it["service"] == "app_gateway" and appgw_capacity_units is not None:
+            it["capacity_units"] = int(appgw_capacity_units)
+        if it["service"] == "lb":
+            if lb_rules is not None:
+                it["rules"] = int(lb_rules)
+            if lb_data_gb is not None:
+                it["data_gb"] = float(lb_data_gb)
 
+    estimate_obj = price_items(items)
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
 # ----------------- AWS / GCP Mocks (no pricing) -----------------
@@ -807,3 +821,91 @@ resource "google_storage_bucket" "assets" {
 }
 """
     }
+
+# =========================
+# Pricing Debug Endpoint
+# =========================
+@app.get("/pricing/debug")
+def pricing_debug(
+    kind: str = Query(..., description="appservice|sql|lb|appgw|raw"),
+    region: str = Query(DEFAULT_REGION),
+    sku: Optional[str] = Query(None),
+    filter: Optional[str] = Query(None, description="Raw $filter override for 'raw' kind"),
+    _=Depends(require_api_key),
+):
+    """
+    Inspect matched retail rows.
+    - appservice/sql require ?sku=...
+    - lb/appgw ignore sku
+    - raw uses ?filter=... directly
+    """
+    try:
+        if kind == "appservice":
+            if not sku: raise HTTPException(400, "sku required")
+            rows = []
+            for reg in region_variants(region):
+                f = f"serviceName eq 'App Service' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0"
+                rows += azure_retail_prices_fetch(f, limit=100)
+            return JSONResponse(rows[:200])
+        elif kind == "sql":
+            if not sku: raise HTTPException(400, "sku required")
+            out = []
+            for reg in region_variants(region):
+                for f in [
+                    f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
+                    f"contains(productName, 'SQL Database') and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
+                    f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') and armRegionName eq '{reg}' and retailPrice ne 0",
+                ]:
+                    out += azure_retail_prices_fetch(f, limit=200)
+            return JSONResponse(out[:300])
+        elif kind == "lb":
+            rows = []
+            for reg in region_variants(region):
+                f = f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' and retailPrice ne 0"
+                rows += azure_retail_prices_fetch(f, 200)
+            return JSONResponse(rows[:300])
+        elif kind == "appgw":
+            rows = []
+            for reg in region_variants(region):
+                f = f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' and retailPrice ne 0"
+                rows += azure_retail_prices_fetch(f, 200)
+            return JSONResponse(rows[:300])
+        elif kind == "raw":
+            if not filter:
+                raise HTTPException(400, "filter required for kind=raw")
+            return JSONResponse(azure_retail_prices_fetch(filter, 200))
+        else:
+            raise HTTPException(400, "unknown kind")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# =========================
+# Bundle Download (ZIP)
+# =========================
+@app.post("/bundle")
+def bundle_zip(payload: dict = Body(...), _=Depends(require_api_key)):
+    """
+    Payload: { diagram: str, terraform: str, cost: obj }
+    Returns a zip with diagram.mmd, main.tf, cost.json
+    """
+    diagram = (payload.get("diagram") or "").strip()
+    tf = (payload.get("terraform") or "").strip()
+    cost = payload.get("cost") or {}
+
+    if not diagram and not tf and not cost:
+        raise HTTPException(400, "Nothing to bundle")
+
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as z:
+        if diagram:
+            z.writestr("diagram.mmd", diagram)
+        if tf:
+            z.writestr("main.tf", tf)
+        z.writestr("cost.json", json.dumps(cost, indent=2))
+        z.writestr("README.txt", "Bundle generated by ArchGenie\n")
+
+    bio.seek(0)
+    headers = {"Content-Disposition": "attachment; filename=archgenie-bundle.zip"}
+    return StreamingResponse(bio, media_type="application/zip", headers=headers)
