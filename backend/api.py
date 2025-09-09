@@ -1,14 +1,11 @@
 import os
 import re
-import io
 import json
 import time
-import zipfile
 import requests
 from typing import List, Dict, Any, Tuple, Optional
-from fastapi import FastAPI, Depends, Header, HTTPException, Body, Query
+from fastapi import FastAPI, Depends, Header, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 
 # =========================
@@ -46,7 +43,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.7.0")
+app = FastAPI(title="ArchGenie Backend", version="7.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -115,75 +112,44 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
     return out
 
 # =========================
-# Mermaid sanitizer (defensive for Mermaid 10.9.x)
+# Mermaid sanitizer
 # =========================
 def sanitize_mermaid(src: str) -> str:
     """
-    Make LLM output parseable:
-    - Ensure leading 'graph TD/LR'
-    - Normalize subgraph lines: subgraph Azure (eastus); -> subgraph "Azure (eastus)"
-    - Node lines no ';', edge lines end with ';'
+    - subgraph "Title (region)" (no trailing ';')
+    - Edge lines end with ';', node lines do not
     - '-. label .->' -> '-. |label| .->'
-    - insert newline after ']' or ')' when followed by node id
-    - remove commas inside [labels]
-    - close unmatched subgraphs
+    - Insert newline after node ']' or ')' if followed by token (fixes ']SP')
+    - Remove commas inside [] labels
     """
     if not src:
-        return "graph TD\nA[Empty]\n"
+        return src
+    s = src
+    s = re.sub(r'^\s*subgraph\s+([^\[\n"]+)\s*\(([^)]+)\)\s*;?\s*$',
+               r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
+    s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
+    s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
 
-    s = src.strip().replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"^```(?:mermaid)?\s*\n", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\n```$", "", s)
-
-    if not re.match(r"^graph\s+(TD|LR)\b", s.strip(), flags=re.IGNORECASE):
-        s = "graph TD\n" + s
-
-    def _fix_subgraph_header(m):
-        body = m.group(1).strip()
-        if body.startswith('"') and body.endswith('"'):
-            return f'subgraph {body}'
-        return f'subgraph "{body}"'
-    s = re.sub(r'^\s*subgraph\s+([^\n;]+)\s*;?\s*$', _fix_subgraph_header, s, flags=re.MULTILINE)
-
-    cleaned = []
+    out_lines: List[str] = []
     for line in s.splitlines():
-        t = line.strip()
-        if not t:
-            cleaned.append("")
+        stripped = line.rstrip().strip()
+        if not stripped:
+            out_lines.append("")
             continue
-
-        t = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.->', r'-. |\1| .->', t)
-
-        is_subgraph = t.startswith("subgraph")
-        is_end = t == "end"
-        is_edge = (("--" in t) or (".->" in t) or ("---" in t))
-
-        if is_subgraph:
-            cleaned.append(t.rstrip(";"))
+        if stripped.startswith("subgraph") or stripped == "end":
+            out_lines.append(stripped)
             continue
-        if is_end:
-            cleaned.append("end")
-            continue
-
-        def _zap_commas(m):
-            return "[" + m.group(1).replace(",", "") + "]"
-        t = re.sub(r'\[(.*?)\]', _zap_commas, t)
-
+        is_edge = ("--" in stripped) or (".->" in stripped) or ("---" in stripped)
         if is_edge:
-            if not t.endswith(";"):
-                t += ";"
-            cleaned.append(t)
+            if not stripped.endswith(";"):
+                stripped += ";"
+            out_lines.append(stripped)
         else:
-            cleaned.append(t.rstrip(";"))
+            out_lines.append(stripped.rstrip(";"))
+    s = "\n".join(out_lines)
 
-    s = "\n".join(cleaned)
-    s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+(?:\[|\(|-|\.))', r'\1\n', s)
-    s = s.replace(";;", ";").replace("`", "")
-
-    open_count = len(re.findall(r'^\s*subgraph\b', s, flags=re.MULTILINE))
-    close_count = len(re.findall(r'^\s*end\s*$', s, flags=re.MULTILINE))
-    if close_count < open_count:
-        s += "\n" + "\n".join(["end"] * (open_count - close_count))
+    s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
+    s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
 
     if not s.endswith("\n"):
         s += "\n"
@@ -203,6 +169,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             d["size_gb"] = float(size_gb)
         items.append(d)
 
+    # Heuristics
     if re.search(r"\bapp service\b|\bweb app\b", blob):
         qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
         add("azure", "app_service", "S1", qty=qty)
@@ -259,6 +226,7 @@ def cache_get(key: str):
 def cache_put(key: str, value, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
+# Region variants map (ARM code -> Retail friendly names)
 _REGION_NAME_MAP = {
     "eastus": "US East",
     "eastus2": "US East 2",
@@ -314,7 +282,7 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
         return round(price * HOURS_PER_MONTH, 2)
     return round(price, 2)
 
-# ---- price resolvers ----
+# ---- Robust price resolvers ----
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
@@ -322,8 +290,11 @@ def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
         return c
 
     service_candidates = [
-        "App Service", "App Service Linux", "Azure App Service",
-        "App Service Plans", "Azure App Service Plans",
+        "App Service",
+        "App Service Linux",
+        "Azure App Service",
+        "App Service Plans",
+        "Azure App Service Plans",
     ]
 
     best_price = None
@@ -379,6 +350,10 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
     return best_price
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
+    """
+    Resolve SQL Database Single DB (e.g., S0/S1/vCore) to a realistic monthly *compute* price.
+    Prefer hourly DTU/vCore/Compute meters; skip backup/storage/IO meters.
+    """
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
     if c is not None:
@@ -395,19 +370,34 @@ def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
         return any(g in meter for g in good_words) or sku.lower() in meter
 
     for reg in region_variants(region):
-        for flt in [
-            f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
-            f"contains(productName, 'SQL Database') and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
-            f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') and armRegionName eq '{reg}' and retailPrice ne 0",
-        ]:
-            items = azure_retail_prices_fetch(flt, limit=200)
-            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
-            pool = hourly or items
-            pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
-            for it in pool:
-                m = monthly_from_retail(it)
-                if best_price is None or (m and m < best_price):
-                    best_price = m
+        flt1 = (
+            f"serviceName eq 'SQL Database' and skuName eq '{sku}' "
+            f"and armRegionName eq '{reg}' and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt1, limit=200)
+
+        if not items:
+            flt2 = (
+                f"contains(productName, 'SQL Database') and skuName eq '{sku}' "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt2, limit=200)
+
+        if not items:
+            flt3 = (
+                f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt3, limit=200)
+
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        pool = hourly or items
+        pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
+
+        for it in pool:
+            m = monthly_from_retail(it)
+            if best_price is None or (m and m < best_price):
+                best_price = m
 
     if best_price is not None:
         cache_put(key, best_price)
@@ -434,6 +424,14 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     return best
 
 def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
+    """
+    Resolve Standard Load Balancer component prices for a region.
+    Returns:
+      {
+        "rule_hour_monthly": $/rule/month   (from hourly "Rule" meters),
+        "data_gb_monthly":   $/GB/month     (from "Data Processed" meters)
+      }
+    """
     key = f"az.lb.standard.components.{region}"
     cached = cache_get(key)
     if cached:
@@ -453,11 +451,31 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
         return ("data" in meter or "processed" in meter or "data path" in meter) and ("gb" in uom)
 
     for reg in region_variants(region):
-        for flt in [
-            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' and retailPrice ne 0",
-            f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' and retailPrice ne 0",
-        ]:
-            items = azure_retail_prices_fetch(flt, limit=200)
+        flt = (
+            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' "
+            f"and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=200)
+
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        for it in hourly:
+            if is_rule_meter(it):
+                m = monthly_from_retail(it)
+                if best_rule is None or (m and m < best_rule):
+                    best_rule = m
+
+        for it in items:
+            if is_data_meter(it):
+                m = monthly_from_retail(it)  # per GB-month
+                if best_data is None or (m and m < best_data):
+                    best_data = m
+
+        if best_rule is None or best_data is None:
+            alt = (
+                f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' "
+                f"and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(alt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
                 if is_rule_meter(it):
@@ -481,6 +499,10 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
     return comps
 
 def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, float]]:
+    """
+    Return {'base_monthly': ..., 'capacity_unit_monthly': ...} for App Gateway WAF_v2 in a region.
+    Prefer hourly meters; choose cheapest matching row for each component.
+    """
     key = f"az.appgw.wafv2.components.{region}"
     cached = cache_get(key)
     if cached:
@@ -502,11 +524,27 @@ def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, fl
         return "capacity unit" in meter and "hour" in uom
 
     for reg in region_variants(region):
-        for flt in [
-            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' and retailPrice ne 0",
-            f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' and retailPrice ne 0",
-        ]:
-            items = azure_retail_prices_fetch(flt, limit=200)
+        flt = (
+            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' "
+            f"and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=200)
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        for it in hourly:
+            m = monthly_from_retail(it)
+            if is_base(it):
+                if best_base is None or (m and m < best_base):
+                    best_base = m
+            elif is_cu(it):
+                if best_cu is None or (m and m < best_cu):
+                    best_cu = m
+
+        if best_base is None or best_cu is None:
+            alt = (
+                f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' "
+                f"and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(alt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
                 m = monthly_from_retail(it)
@@ -669,8 +707,7 @@ def price_items(items: List[dict]) -> dict:
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
     Generate Azure architecture (diagram + Terraform) via Azure MCP (AOAI).
-    Returns sanitized diagram, terraform, and pricing.
-    Supports overrides: appgw_capacity_units, lb_rules, lb_data_gb.
+    Strict: no local fallback. Returns sanitized diagram, terraform, and pricing.
     """
     if not _aoai_configured():
         raise HTTPException(status_code=500, detail="Azure OpenAI not configured")
@@ -678,11 +715,6 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     app_name = payload.get("app_name", "3-tier web app")
     extra = payload.get("prompt") or ""
     region = payload.get("region") or DEFAULT_REGION
-
-    overrides = payload.get("overrides") or {}
-    appgw_capacity_units = overrides.get("appgw_capacity_units")
-    lb_rules = overrides.get("lb_rules")
-    lb_data_gb = overrides.get("lb_data_gb")
 
     system = (
         "You are ArchGenie's Azure MCP.\n"
@@ -724,18 +756,9 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     diagram = sanitize_mermaid(diagram_raw)
     tf      = strip_fences(tf_raw)
 
-    # build items, then apply overrides if present
     items = normalize_to_items(ask=extra or app_name, diagram=diagram, tf=tf, region=region)
-    for it in items:
-        if it["service"] == "app_gateway" and appgw_capacity_units is not None:
-            it["capacity_units"] = int(appgw_capacity_units)
-        if it["service"] == "lb":
-            if lb_rules is not None:
-                it["rules"] = int(lb_rules)
-            if lb_data_gb is not None:
-                it["data_gb"] = float(lb_data_gb)
-
     estimate_obj = price_items(items)
+
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
 # ----------------- AWS / GCP Mocks (no pricing) -----------------
@@ -784,85 +807,3 @@ resource "google_storage_bucket" "assets" {
 }
 """
     }
-
-# =========================
-# Pricing Debug Endpoint
-# =========================
-@app.get("/pricing/debug")
-def pricing_debug(
-    kind: str = Query(..., description="appservice|sql|lb|appgw|raw"),
-    region: str = Query(DEFAULT_REGION),
-    sku: Optional[str] = Query(None),
-    filter: Optional[str] = Query(None, description="Raw $filter override for 'raw' kind"),
-    _=Depends(require_api_key),
-):
-    try:
-        if kind == "appservice":
-            if not sku: raise HTTPException(400, "sku required")
-            rows = []
-            for reg in region_variants(region):
-                f = f"serviceName eq 'App Service' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0"
-                rows += azure_retail_prices_fetch(f, limit=100)
-            return JSONResponse(rows[:200])
-        elif kind == "sql":
-            if not sku: raise HTTPException(400, "sku required")
-            out = []
-            for reg in region_variants(region):
-                for f in [
-                    f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
-                    f"contains(productName, 'SQL Database') and skuName eq '{sku}' and armRegionName eq '{reg}' and retailPrice ne 0",
-                    f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') and armRegionName eq '{reg}' and retailPrice ne 0",
-                ]:
-                    out += azure_retail_prices_fetch(f, limit=200)
-            return JSONResponse(out[:300])
-        elif kind == "lb":
-            rows = []
-            for reg in region_variants(region):
-                f = f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' and retailPrice ne 0"
-                rows += azure_retail_prices_fetch(f, 200)
-            return JSONResponse(rows[:300])
-        elif kind == "appgw":
-            rows = []
-            for reg in region_variants(region):
-                f = f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' and retailPrice ne 0"
-                rows += azure_retail_prices_fetch(f, 200)
-            return JSONResponse(rows[:300])
-        elif kind == "raw":
-            if not filter:
-                raise HTTPException(400, "filter required for kind=raw")
-            return JSONResponse(azure_retail_prices_fetch(filter, 200))
-        else:
-            raise HTTPException(400, "unknown kind")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-# =========================
-# Bundle Download (ZIP)
-# =========================
-@app.post("/bundle")
-def bundle_zip(payload: dict = Body(...), _=Depends(require_api_key)):
-    """
-    Payload: { diagram: str, terraform: str, cost: obj }
-    Returns a zip with diagram.mmd, main.tf, cost.json
-    """
-    diagram = (payload.get("diagram") or "").strip()
-    tf = (payload.get("terraform") or "").strip()
-    cost = payload.get("cost") or {}
-
-    if not diagram and not tf and not cost:
-        raise HTTPException(400, "Nothing to bundle")
-
-    bio = io.BytesIO()
-    with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as z:
-        if diagram:
-            z.writestr("diagram.mmd", diagram)
-        if tf:
-            z.writestr("main.tf", tf)
-        z.writestr("cost.json", json.dumps(cost, indent=2))
-        z.writestr("README.txt", "Bundle generated by ArchGenie\n")
-
-    bio.seek(0)
-    headers = {"Content-Disposition": "attachment; filename=archgenie-bundle.zip"}
-    return StreamingResponse(bio, media_type="application/zip", headers=headers)
