@@ -24,6 +24,7 @@ AZURE_OPENAI_FORCE_JSON  = os.getenv("AZURE_OPENAI_FORCE_JSON", "true").lower() 
 USE_LIVE_AZURE_PRICES = os.getenv("USE_LIVE_AZURE_PRICES", "true").lower() == "true"
 HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
 
+# Default region if none provided by user
 DEFAULT_REGION = os.getenv("DEFAULT_REGION", "eastus")
 
 # =========================
@@ -36,7 +37,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.1.0")
+app = FastAPI(title="ArchGenie Backend", version="7.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -127,8 +128,7 @@ def sanitize_mermaid(src: str) -> str:
 
     out_lines: List[str] = []
     for line in s.splitlines():
-        raw = line.rstrip()
-        stripped = raw.strip()
+        stripped = line.rstrip().strip()
         if not stripped:
             out_lines.append("")
             continue
@@ -141,8 +141,7 @@ def sanitize_mermaid(src: str) -> str:
                 stripped += ";"
             out_lines.append(stripped)
         else:
-            stripped = stripped.rstrip(";")
-            out_lines.append(stripped)
+            out_lines.append(stripped.rstrip(";"))
     s = "\n".join(out_lines)
 
     s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
@@ -166,6 +165,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             d["size_gb"] = float(size_gb)
         items.append(d)
 
+    # Heuristics
     if re.search(r"\bapp service\b|\bweb app\b", blob):
         qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
         add("azure", "app_service", "S1", qty=qty)
@@ -200,29 +200,70 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     return items
 
 # =========================
-# Azure Retail Prices — cache + helpers
+# Azure Retail Prices — helpers
 # =========================
 _price_cache: Dict[str, Tuple[float, float]] = {}
 
 def cache_get(key: str) -> Optional[float]:
     v = _price_cache.get(key)
-    if not v:
-        return None
+    if not v: return None
     price, exp = v
     return price if exp > time.time() else None
 
 def cache_put(key: str, value: float, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
-def azure_price_query(filter_str: str) -> Optional[Dict[str, Any]]:
-    url = "https://prices.azure.com/api/retail/prices"
+# Region variants map (ARM code -> Retail friendly names), plus heuristics
+_REGION_NAME_MAP = {
+    "eastus": "US East",
+    "eastus2": "US East 2",
+    "centralus": "US Central",
+    "westus": "US West",
+    "westus2": "US West 2",
+    "southcentralus": "US South Central",
+    "northcentralus": "US North Central",
+    "westeurope": "EU West",
+    "northeurope": "EU North",
+}
+def region_variants(region: str) -> List[str]:
+    if not region: return []
+    r = region.strip()
+    variants = set()
+    variants.add(r)
+    variants.add(r.lower())
+    mapped = _REGION_NAME_MAP.get(r.lower())
+    if mapped:
+        variants.add(mapped)
+    # hyphen/space/title variants
+    r_sp = r.replace("-", " ")
+    variants.add(r_sp)
+    variants.add(r_sp.title())
+    if r.lower().endswith("us") and len(r) > 2:
+        variants.add(r[:-2].title() + " US")
+    return list(variants)
+
+def azure_retail_prices_fetch(filter_str: str, limit: int = 100) -> list:
+    base = "https://prices.azure.com/api/retail/prices"
     params = {"api-version": "2023-01-01-preview", "$filter": filter_str}
-    r = requests.get(url, params=params, timeout=30)
-    if r.status_code >= 300:
-        return None
-    j = r.json()
-    items = j.get("Items") or []
-    return items[0] if items else None
+    out = []
+    url = base
+    tries = 0
+    while True:
+        tries += 1
+        r = requests.get(url, params=params if url == base else None, timeout=30)
+        if r.status_code >= 300:
+            return []
+        j = r.json()
+        items = j.get("Items") or []
+        out.extend(items)
+        if len(out) >= limit:
+            return out[:limit]
+        next_link = j.get("NextPageLink")
+        if not next_link or tries > 20:
+            break
+        url = next_link
+        params = None
+    return out
 
 def monthly_from_retail(item: Dict[str, Any]) -> float:
     price = float(item.get("retailPrice") or 0.0)
@@ -231,96 +272,222 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
         return round(price * HOURS_PER_MONTH, 2)
     return round(price, 2)
 
+# ---- Robust price resolvers ----
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
+    """
+    Try several product/serviceName combinations and region-name variants to find S1/P1v3/etc.
+    Prefer hourly meters and choose lowest monthly.
+    """
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'App Service' and skuName eq '{sku}' and armRegionName eq '{region}'"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+
+    service_candidates = [
+        "App Service",
+        "App Service Linux",
+        "Azure App Service",
+        "App Service Plans",
+        "Azure App Service Plans",
+    ]
+
+    best_price = None
+    for reg in region_variants(region):
+        for svc in service_candidates:
+            flt = (
+                f"serviceName eq '{svc}' and skuName eq '{sku}' "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt, limit=60)
+
+            if not items:
+                alt = (
+                    f"contains(productName, 'App Service') and skuName eq '{sku}' "
+                    f"and armRegionName eq '{reg}' and retailPrice ne 0"
+                )
+                items = azure_retail_prices_fetch(alt, limit=60)
+
+            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+            pool = hourly or items
+            for it in pool:
+                m = monthly_from_retail(it)
+                if best_price is None or (m and m < best_price):
+                    best_price = m
+
+    if best_price is not None:
+        cache_put(key, best_price)
+    return best_price
 
 def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
     key = f"az.vm.{region}.{size}"
     c = cache_get(key)
-    if c is not None: return c
-    candidates = [size, size.replace("_", " "), size.replace("v", " v")]
-    for sku in candidates:
-        f = f"serviceName eq 'Virtual Machines' and skuName eq '{sku}' and armRegionName eq '{region}'"
-        item = azure_price_query(f)
-        if item:
-            monthly = monthly_from_retail(item)
-            cache_put(key, monthly)
-            return monthly
-    return None
+    if c is not None:
+        return c
+
+    best_price = None
+    for reg in region_variants(region):
+        # VM meters often match SKU exactly (e.g., B2s), but try small variations too
+        candidates = [size, size.replace("_", " "), size.replace("v", " v")]
+        for sku in candidates:
+            flt = (
+                f"serviceName eq 'Virtual Machines' and skuName eq '{sku}' "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt, limit=80)
+            hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+            pool = hourly or items
+            for it in pool:
+                m = monthly_from_retail(it)
+                if best_price is None or (m and m < best_price):
+                    best_price = m
+
+    if best_price is not None:
+        cache_put(key, best_price)
+    return best_price
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
+    """
+    Handle Single DB S0/S1/etc. Try serviceName, productName, meterName strategies and region variants.
+    Prefer compute meters; skip backup/storage/IO where possible.
+    """
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'SQL Database' and skuName eq '{sku}' and armRegionName eq '{region}'"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+
+    best_price = None
+    for reg in region_variants(region):
+        flt1 = (
+            f"serviceName eq 'SQL Database' and skuName eq '{sku}' "
+            f"and armRegionName eq '{reg}' and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt1, limit=120)
+
+        if not items:
+            flt2 = (
+                f"contains(productName, 'SQL Database') and skuName eq '{sku}' "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt2, limit=120)
+
+        if not items:
+            flt3 = (
+                f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') "
+                f"and armRegionName eq '{reg}' and retailPrice ne 0"
+            )
+            items = azure_retail_prices_fetch(flt3, limit=120)
+
+        hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
+        pool = hourly or items
+        for it in pool:
+            meter = (it.get("meterName") or "").lower()
+            # try to skip non-compute meters
+            if any(k in meter for k in ["backup", "storage", "io", "data processed"]):
+                continue
+            m = monthly_from_retail(it)
+            if best_price is None or (m and m < best_price):
+                best_price = m
+
+    if best_price is not None:
+        cache_put(key, best_price)
+    return best_price
 
 def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     key = f"az.storage.lrs.{region}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'Storage' and armRegionName eq '{region}' and contains(skuName, 'LRS')"
-    item = azure_price_query(f)
-    if not item: return None
-    price = monthly_from_retail(item)  # per GB-month
-    cache_put(key, price)
-    return price
+    if c is not None:
+        return c
+    best = None
+    for reg in region_variants(region):
+        flt = (
+            f"serviceName eq 'Storage' and armRegionName eq '{reg}' "
+            f"and contains(skuName, 'LRS') and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=80)
+        for it in items:
+            m = monthly_from_retail(it)  # usually per GB-month
+            if best is None or (m and m < best):
+                best = m
+    if best is not None:
+        cache_put(key, best)
+    return best
 
 def azure_price_for_lb(region: str) -> Optional[float]:
     key = f"az.lb.standard.{region}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'Load Balancer' and armRegionName eq '{region}' and contains(skuName, 'Standard')"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+    best = None
+    for reg in region_variants(region):
+        flt = (
+            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' "
+            f"and contains(skuName, 'Standard') and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=60)
+        for it in items:
+            m = monthly_from_retail(it)
+            if best is None or (m and m < best):
+                best = m
+    if best is not None:
+        cache_put(key, best)
+    return best
 
 def azure_price_for_appgw_wafv2(region: str) -> Optional[float]:
     key = f"az.appgw.wafv2.{region}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'Application Gateway' and armRegionName eq '{region}' and contains(skuName, 'WAF_v2')"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+    best = None
+    for reg in region_variants(region):
+        flt = (
+            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' "
+            f"and contains(skuName, 'WAF_v2') and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=60)
+        for it in items:
+            m = monthly_from_retail(it)
+            if best is None or (m and m < best):
+                best = m
+    if best is not None:
+        cache_put(key, best)
+    return best
 
 def azure_price_for_redis(sku: str, region: str) -> Optional[float]:
     key = f"az.redis.{region}.{sku}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'Azure Cache for Redis' and skuName eq '{sku}' and armRegionName eq '{region}'"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+    best = None
+    for reg in region_variants(region):
+        flt = (
+            f"serviceName eq 'Azure Cache for Redis' and skuName eq '{sku}' "
+            f"and armRegionName eq '{reg}' and retailPrice ne 0"
+        )
+        items = azure_retail_prices_fetch(flt, limit=60)
+        for it in items:
+            m = monthly_from_retail(it)
+            if best is None or (m and m < best):
+                best = m
+    if best is not None:
+        cache_put(key, best)
+    return best
 
 def azure_price_for_log_analytics(region: str) -> Optional[float]:
     key = f"az.loganalytics.{region}"
     c = cache_get(key)
-    if c is not None: return c
-    f = f"serviceName eq 'Log Analytics' and armRegionName eq '{region}'"
-    item = azure_price_query(f)
-    if not item: return None
-    monthly = monthly_from_retail(item)
-    cache_put(key, monthly)
-    return monthly
+    if c is not None:
+        return c
+    best = None
+    for reg in region_variants(region):
+        flt = f"serviceName eq 'Log Analytics' and armRegionName eq '{reg}' and retailPrice ne 0"
+        items = azure_retail_prices_fetch(flt, limit=60)
+        for it in items:
+            m = monthly_from_retail(it)
+            if best is None or (m and m < best):
+                best = m
+    if best is not None:
+        cache_put(key, best)
+    return best
 
 # =========================
 # Pricing Engine
@@ -458,7 +625,7 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
 
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
-# ----------------- AWS / GCP Mocks -----------------
+# ----------------- AWS / GCP Mocks (no pricing) -----------------
 @app.get("/mcp/aws/diagram-tf")
 def aws_mock(_=Depends(require_api_key)):
     return {
