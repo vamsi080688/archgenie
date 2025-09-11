@@ -1,84 +1,184 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>ArchGenie</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link href="./styles.css" rel="stylesheet" />
-    <script src="https://unpkg.com/mermaid@10/dist/mermaid.min.js"></script>
-  </head>
-  <body>
-    <main class="wrap">
-      <header class="hero">
-        <img src="logo.png" alt="ArchGenie Logo" class="logo" />
-        <h1>ArchGenie</h1>
-        <p>AI-powered Architecture Generator</p>
-        <p class="sub">Frontend served by Nginx, backend proxied at <code>/api</code></p>
-      </header>
+<head>
+  <meta charset="utf-8" />
+  <title>ArchGenie</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--acc:#2563eb;--text:#e5e7eb;--muted:#9ca3af;--ok:#22c55e;--err:#ef4444;--r:16px;--sh:0 10px 28px rgba(0,0,0,.35)}
+    body{margin:0;background:radial-gradient(1200px 800px at 20% 0%, #111827, #0b1224 60%, #060b17 100%), var(--bg);color:var(--text);font:16px/1.6 system-ui,Segoe UI,Roboto,Arial;}
+    header{padding:24px 20px;display:flex;justify-content:space-between;align-items:center}
+    .brand{display:flex;gap:12px;align-items:center}.brand img{height:38px}.brand h1{margin:0;font-size:1.35rem}
+    main{max-width:1200px;margin:0 auto 60px;padding:0 18px;display:grid;gap:18px;grid-template-columns:1.05fr 1fr}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0) 60%), rgba(17,24,39,.7);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);box-shadow:var(--sh)}
+    .card header{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06)}
+    .card header h2{margin:0;font-size:1.05rem;color:#dbeafe}
+    .content{padding:14px 16px}
+    .row{display:grid;gap:12px}.cols-2{grid-template-columns:1fr 1fr}
+    input,textarea{width:100%;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(2,6,23,.6);color:var(--text);padding:10px 12px;outline:none}
+    input:focus,textarea:focus{border-color:rgba(37,99,235,.65);box-shadow:0 0 0 3px rgba(37,99,235,.25)}
+    textarea{min-height:100px}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+    button{border-radius:12px;padding:10px 14px;color:#fff;border:1px solid rgba(255,255,255,.1);background:rgba(37,99,235,.25)}
+    button.primary{background:linear-gradient(180deg,#3b82f6,#2563eb);border:none;font-weight:600}
+    .status{margin-left:8px;color:#9ca3af}.status.err{color:#ef4444}
+    .mermaid-wrap{background:#0b1220;border-radius:12px;border:1px solid rgba(255,255,255,.06);padding:10px;overflow:auto;min-height:260px}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+    tfoot td{font-weight:700}
+  </style>
+  <script>mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });</script>
+</head>
+<body>
+  <header>
+    <div class="brand"><img src="logo.png" alt=""><h1>ArchGenie</h1></div>
+    <div class="status">status: <span id="status" class="">ready</span></div>
+  </header>
 
-      <section class="panel">
-        <div class="row">
-          <label>App Name</label>
-          <input id="appName" type="text" value="secure Azure 3-tier web app" />
-        </div>
-        <div class="row">
-          <label>Prompt</label>
-          <textarea id="prompt" rows="3" placeholder="e.g. frontend & backend as App Service, use MSSQL database"></textarea>
-        </div>
-        <div class="row">
-          <div class="col">
-            <label>Region (optional)</label>
-            <input id="region" type="text" placeholder="eastus (defaults in backend)" />
-          </div>
-          <div class="col">
-            <label>API Key (x-api-key)</label>
-            <input id="apiKey" type="password" placeholder="super-secret-key" />
-          </div>
-        </div>
-        <div class="row actions">
-          <button id="btnGenerate">Generate with Azure MCP</button>
-          <button id="btnGenerateAws">Generate with AWS MCP</button>
-          <span id="status" class="status"></span>
-        </div>
-      </section>
+  <section class="card" style="grid-column:1 / span 2">
+    <header><h2>Design Prompt</h2></header>
+    <div class="content">
+      <div class="row cols-2">
+        <div><label>App / Use case</label><input id="appName" value="secure 3-tier web app"></div>
+        <div><label>API Key (x-api-key)</label><input id="apiKey" placeholder="super-secret-key"></div>
+      </div>
+      <div class="row">
+        <div><label>Custom prompt</label><textarea id="prompt" placeholder="Azure: FE/BE App Service + Azure SQL · AWS: ALB + EC2 ASG + RDS"></textarea></div>
+      </div>
+      <div class="row cols-2">
+        <div><label>Azure Region</label><input id="regionAz" placeholder="eastus (default in backend)"></div>
+        <div><label>AWS Region</label><input id="regionAws" placeholder="us-east-1 (default in backend)"></div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="btnAzure">Generate (Azure MCP)</button>
+        <button id="btnAws">Generate (AWS MCP)</button>
+        <button id="btnZip">Download Bundle (zip)</button>
+        <span id="busy" class="status"></span>
+      </div>
+    </div>
+  </section>
 
-      <section class="grid">
-        <div class="card">
-          <div class="card-head">
-            <h3>Architecture Diagram</h3>
-            <div class="right">
-              <button id="btnSvg">Download SVG</button>
-              <button id="btnPng">Download PNG</button>
-            </div>
-          </div>
-          <div id="diagramHost" class="diagram-host"></div>
-        </div>
+  <section class="card">
+    <header><h2>Architecture Diagram</h2></header>
+    <div class="content">
+      <div id="diagramContainer" class="mermaid-wrap"><div class="status">No diagram yet.</div></div>
+      <details style="margin-top:8px"><summary>Mermaid Source</summary><pre id="mermaidSrc" class="mono" style="white-space:pre-wrap"></pre></details>
+    </div>
+  </section>
 
-        <div class="card">
-          <div class="card-head">
-            <h3>Terraform</h3>
-            <div class="right">
-              <button id="btnCopyTf">Copy</button>
-              <button id="btnDlTf">Download .tf</button>
-            </div>
-          </div>
-          <textarea id="tfOut" class="code" rows="16" spellcheck="false"></textarea>
-        </div>
+  <section class="card">
+    <header><h2>Terraform</h2></header>
+    <div class="content"><textarea id="tf" class="mono" rows="18" spellcheck="false"></textarea></div>
+  </section>
 
-        <div class="card">
-          <div class="card-head">
-            <h3>Estimated Monthly Cost</h3>
-            <div class="right"></div>
-          </div>
-          <div id="pricing"></div>
-        </div>
-      </section>
+  <section class="card" style="grid-column:1 / span 2">
+    <header><h2>Estimated Monthly Cost</h2></header>
+    <div class="content"><div id="pricing"></div></div>
+  </section>
 
-      <footer class="foot">
-        <small>© ArchGenie</small>
-      </footer>
-    </main>
+  <script>
+    const $ = (s)=>document.querySelector(s);
+    const setBusy =(t, ok=true)=>{ const el=$("#busy"); el.textContent=t||""; el.classList.toggle("err", !ok); };
+    const headers = ()=>({"x-api-key": ($("#apiKey").value||"super-secret-key").trim(), "Content-Type":"application/json"});
 
-    <script src="./app.js"></script>
-  </body>
+    function cleanMermaid(text){
+      if(!text) return "graph TD\\nA[Empty]\\n";
+      let s=text.trim().replace(/\\r\\n/g,"\\n").replace(/\\r/g,"\\n");
+      s=s.replace(/^```(?:mermaid)?\\s*\\n/i,"").replace(/\\n```$/,"");
+      if(!/^graph\\s+(TD|LR)\\b/i.test(s)) s="graph TD\\n"+s;
+      s=s.replace(/^\\s*subgraph\\s+([^\\n;]+)\\s*;?\\s*$/gm,(m,p)=>`subgraph \"${p.trim()}\"`);
+      s=s.replace(/-\\.\\s+([^.|><\\-\\n][^.|><\\-\\n]*?)\\s+\\.->/g,"-. |$1| .->");
+      s=s.split("\\n").map(line=>{
+        let t=line.trim(); if(!t) return "";
+        const isSub=t.startsWith("subgraph"), isEnd=(t==="end");
+        const isEdge=(t.includes("--")||t.includes(".->")||t.includes("---"));
+        t=t.replace(/\\[(.*?)\\]/g,(m,a)=>"["+a.replace(/,/g,"")+"]");
+        if(isSub) return t.replace(/;+/,"");
+        if(isEnd) return "end";
+        if(isEdge && !t.endsWith(";")) t+=";";
+        if(!isEdge) t=t.replace(/;+/g,"");
+        return t;
+      }).join("\\n");
+      const opens=(s.match(/^\\s*subgraph\\b/mg)||[]).length, ends=(s.match(/^\\s*end\\s*$/mg)||[]).length;
+      if(ends<opens) s+="\\n"+"end\\n".repeat(opens-ends);
+      if(!s.endsWith("\\n")) s+="\\n";
+      return s;
+    }
+
+    function renderMermaid(src){
+      const d=cleanMermaid(src||"");
+      const host=$("#diagramContainer");
+      host.innerHTML=`<div class="mermaid">${d}</div>`;
+      try { mermaid.parse(d); mermaid.run({nodes:[host]}); } catch(e){ host.innerHTML=`<div class="status err">Mermaid error: ${e?.str||e?.message}</div><pre>${d}</pre>`; }
+      $("#mermaidSrc").textContent=d;
+    }
+    function renderSvg(svgText){ $("#diagramContainer").innerHTML = svgText; $("#mermaidSrc").textContent = "(image from AWS Diagram MCP)"; }
+
+    function renderPricing(cost){
+      const host=$("#pricing");
+      if(!cost || !Array.isArray(cost.items)){ host.innerHTML='<div class="status">No pricing data.</div>'; return; }
+      const rows = cost.items.map(it=>`<tr>
+        <td>${it.cloud||""}</td><td>${it.service||""}</td><td>${it.sku||""}</td>
+        <td>${it.region||""}</td><td>${it.qty||1}</td>
+        <td>${it.size_gb? it.size_gb+" GB": ""}</td>
+        <td>${it.unit_monthly!=null? "$"+(+it.unit_monthly).toFixed(2): ""}</td>
+        <td>${it.monthly!=null? "$"+(+it.monthly).toFixed(2): ""}</td>
+      </tr>`).join("");
+      const notes=(cost.notes||[]).map(n=>`<li>${n}</li>`).join("");
+      host.innerHTML = `
+        <table>
+          <thead><tr><th>Cloud</th><th>Service</th><th>SKU</th><th>Region</th><th>Qty</th><th>Size</th><th>Unit/Month</th><th>Monthly</th></tr></thead>
+          <tbody>${rows||`<tr><td colspan="8" class="status">No items</td></tr>`}</tbody>
+          <tfoot><tr><td colspan="7" style="text-align:right"><b>Total (${cost.currency||"USD"})</b></td><td><b>$${(+cost.total_estimate||0).toFixed(2)}</b></td></tr></tfoot>
+        </table>
+        ${notes? `<div style="margin-top:6px"><b>Notes</b><ul>${notes}</ul></div>`:""}
+      `;
+    }
+
+    async function genAzure(){
+      setBusy("generating (Azure)...");
+      const res = await fetch("/api/mcp/azure/diagram-tf", {
+        method:"POST", headers:headers(),
+        body:JSON.stringify({ app_name: $("#appName").value.trim(), prompt: $("#prompt").value.trim(), region: $("#regionAz").value.trim() || undefined })
+      });
+      if(!res.ok){ setBusy("error", false); return alert(await res.text()); }
+      const out=await res.json();
+      if(out.diagram && out.diagram.startsWith("graph ")) renderMermaid(out.diagram); else $("#diagramContainer").innerHTML='<div class="status">No diagram.</div>';
+      $("#tf").value = out.terraform || "";
+      renderPricing(out.cost);
+      setBusy("");
+    }
+
+    async function genAws(){
+      setBusy("generating (AWS)...");
+      const res = await fetch("/api/mcp/aws/diagram-tf-cost", {
+        method:"POST", headers:headers(),
+        body:JSON.stringify({ prompt: $("#prompt").value.trim(), region: $("#regionAws").value.trim() || undefined, format:"svg" })
+      });
+      if(!res.ok){ setBusy("error", false); return alert(await res.text()); }
+      const out=await res.json();
+      if(out.diagram_svg) renderSvg(out.diagram_svg); else $("#diagramContainer").innerHTML='<div class="status">No diagram.</div>';
+      $("#tf").value = out.terraform || "";
+      renderPricing(out.cost);
+      setBusy("");
+    }
+
+    async function bundleZip(){
+      const svg = $("#diagramContainer").innerHTML.startsWith("<svg") ? $("#diagramContainer").innerHTML : "";
+      const tf  = $("#tf").value || "";
+      const mer = $("#mermaidSrc").textContent.startsWith("graph ") ? $("#mermaidSrc").textContent : "";
+      const payload={}; if(svg) payload.image_svg=svg; if(tf) payload.terraform=tf; if(mer) payload.diagram=mer;
+      if(!Object.keys(payload).length) return alert("Nothing to bundle");
+      const r=await fetch("/api/bundle",{method:"POST", headers:headers(), body:JSON.stringify(payload)});
+      if(!r.ok) return alert("Bundle failed");
+      const blob=await r.blob(); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="archgenie-bundle.zip"; a.click(); URL.revokeObjectURL(url);
+    }
+
+    document.getElementById("btnAzure").addEventListener("click", genAzure);
+    document.getElementById("btnAws").addEventListener("click", genAws);
+    document.getElementById("btnZip").addEventListener("click", bundleZip);
+  </script>
+</body>
 </html>
