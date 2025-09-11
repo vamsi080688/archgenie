@@ -1,190 +1,283 @@
-// Mermaid init (we render manually via API)
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+/* global mermaid */
 
-const el = (id) => document.getElementById(id);
-const appNameInput = el('appName');
-const promptInput  = el('prompt');
-const regionInput  = el('region');
-const apiKeyInput  = el('apiKey');
-const btnGenerate  = el('btnGenerate');
-const statusEl     = el('status');
-const diagramHost  = el('diagramHost');
-const btnSvg       = el('btnSvg');
-const btnPng       = el('btnPng');
-const tfOut        = el('tfOut');
-const btnCopyTf    = el('btnCopyTf');
-const btnDlTf      = el('btnDlTf');
-const pricingDiv   = el('pricing');
+const $ = (sel) => document.querySelector(sel);
+const statusEl = $("#status");
+const diagHost = $("#diagramHost");
+const tfOut = $("#tfOut");
+const pricingHost = $("#pricing");
 
-let lastSvg = '';
-let lastDiagram = '';
-let lastTf = '';
-let lastCost = null;
-
-function lastMileSanitize(diagram) {
-  diagram = diagram.replace(/^(\s*subgraph[^\n;]*);+\s*$/gm, '$1');
-  diagram = diagram.replace(/(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))/g, '$1\n');
-  return diagram;
+function setStatus(text, ok = true) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("err", !ok);
 }
 
-async function callAzureMcp() {
-  const appName = appNameInput.value.trim() || '3-tier web app';
-  const prompt  = promptInput.value.trim();
-  const region  = regionInput.value.trim();
-  const apiKey  = apiKeyInput.value.trim();
+function headersJSON() {
+  const key = ($("#apiKey").value || "").trim() || "super-secret-key";
+  return { "x-api-key": key, "Content-Type": "application/json" };
+}
 
-  if (!apiKey) {
-    statusEl.textContent = 'Please enter your x-api-key.';
-    return;
-  }
+// --------------------- Diagram helpers ---------------------
+function isSvgString(s) {
+  return typeof s === "string" && s.trim().startsWith("<svg");
+}
 
-  btnGenerate.disabled = true;
-  statusEl.textContent = 'Generating...';
+function currentSvgString() {
+  // If diagramHost contains an <svg>, return it
+  const svg = diagHost.querySelector("svg");
+  if (svg) return svg.outerHTML;
+  // If Mermaid rendered into a DIV with innerHTML as SVG, grab it
+  if (isSvgString(diagHost.innerHTML)) return diagHost.innerHTML;
+  return "";
+}
 
+function renderMermaid(src) {
+  const clean = cleanMermaid(src || "");
+  diagHost.innerHTML = `<div class="mermaid">${clean}</div>`;
   try {
-    const body = { app_name: appName, prompt };
-    if (region) body.region = region;
-
-    const res = await fetch('/api/mcp/azure/diagram-tf', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify(body)
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(errText)}</pre>`;
-      throw new Error(`Backend error (${res.status})`);
-    }
-
-    const data = await res.json();
-    lastDiagram = (data.diagram || '').trim();
-    lastTf      = (data.terraform || '').trim();
-    lastCost    = data.cost || null;
-
-    const safeDiagram = lastMileSanitize(lastDiagram);
-    await renderMermaidToSvg(safeDiagram);
-    renderTerraform(lastTf);
-    renderPricing(lastCost);
-
-    statusEl.textContent = 'Done.';
+    mermaid.parse(clean);
+    mermaid.run({ nodes: [diagHost] });
   } catch (e) {
-    console.error(e);
-    statusEl.textContent = e.message || 'Request failed.';
-    if (!diagramHost.innerHTML) {
-      diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(lastDiagram || '(no diagram)')}</pre>`;
-    }
-  } finally {
-    btnGenerate.disabled = false;
+    diagHost.innerHTML = `<div class="err">Mermaid parse error: ${e?.str || e?.message}</div><pre>${clean}</pre>`;
   }
 }
 
-async function renderMermaidToSvg(diagramText) {
-  const id = 'arch-' + Math.random().toString(36).slice(2, 9);
-  try {
-    const { svg } = await mermaid.render(id, diagramText);
-    lastSvg = svg;
-    diagramHost.innerHTML = svg;
-    diagramHost.querySelector('svg')?.setAttribute('width', '100%');
-  } catch (err) {
-    console.error('Mermaid render error', err);
-    diagramHost.innerHTML = `<pre class="mermaid">${escapeHtml(diagramText)}</pre>`;
-  }
+function renderSvg(svgText) {
+  diagHost.innerHTML = svgText;
 }
 
-function renderTerraform(tf) { tfOut.value = tf || ''; }
+function cleanMermaid(text) {
+  if (!text) return "graph TD\nA[Empty]\n";
+  let s = text.trim().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  s = s.replace(/^```(?:mermaid)?\s*\n/i, "").replace(/\n```$/, "");
+  if (!/^graph\s+(TD|LR)\b/i.test(s)) s = "graph TD\n" + s;
+  // Quote subgraph titles and normalize edges
+  s = s.replace(/^\s*subgraph\s+([^\n;]+)\s*;?\s*$/gm, (m, p1) => `subgraph "${p1.trim()}"`);
+  s = s.replace(/-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.->/g, "-. |$1| .->");
+  // Ensure edge lines end with ';', node lines not
+  s = s
+    .split("\n")
+    .map((line) => {
+      let t = line.trim();
+      if (!t) return "";
+      const isSub = t.startsWith("subgraph"), isEnd = t === "end";
+      const isEdge = t.includes("--") || t.includes(".->") || t.includes("---");
+      t = t.replace(/\[(.*?)\]/g, (m, a) => "[" + a.replace(/,/g, "") + "]");
+      if (isSub) return t.replace(/;+\s*$/, "");
+      if (isEnd) return "end";
+      if (isEdge && !t.endsWith(";")) t += ";";
+      if (!isEdge) t = t.replace(/;+\s*$/, "");
+      return t;
+    })
+    .join("\n");
+  // Balance subgraphs
+  const opens = (s.match(/^\s*subgraph\b/mg) || []).length;
+  const ends = (s.match(/^\s*end\s*$/mg) || []).length;
+  if (ends < opens) s += "\n" + "end\n".repeat(opens - ends);
+  if (!s.endsWith("\n")) s += "\n";
+  return s;
+}
 
-function renderPricing(costObj) {
-  if (!costObj || !Array.isArray(costObj.items)) {
-    pricingDiv.innerHTML = '<p class="muted">No cost data.</p>';
+// --------------------- Pricing rendering ---------------------
+function renderPricing(cost) {
+  if (!cost || !Array.isArray(cost.items)) {
+    pricingHost.innerHTML = '<div class="muted">No pricing data.</div>';
     return;
   }
-  const rows = costObj.items.map(it => {
-    const size = it.size_gb ? `${it.size_gb} GB` : '';
-    const hours = it.hours ? `${it.hours} h/mo` : '';
-    return `
-      <tr>
-        <td>${it.cloud}</td>
-        <td>${it.service}</td>
-        <td>${escapeHtml(it.sku || '')}</td>
-        <td>${it.region}</td>
-        <td style="text-align:right">${it.qty}</td>
+  const currency = cost.currency || "USD";
+  const rows = cost.items
+    .map((it) => {
+      const size = it.size_gb ? `${it.size_gb} GB` : "";
+      const hrs = it.hours ? `${it.hours}` : "";
+      const unit = (it.unit_monthly ?? 0).toFixed(2);
+      const mo = (it.monthly ?? 0).toFixed(2);
+      return `<tr>
+        <td>${it.cloud || ""}</td>
+        <td>${it.service || ""}</td>
+        <td>${it.sku || ""}</td>
+        <td>${it.region || ""}</td>
+        <td>${it.qty || 1}</td>
         <td>${size}</td>
-        <td>${hours}</td>
-        <td style="text-align:right">$${Number(it.unit_monthly || 0).toFixed(2)}</td>
-        <td style="text-align:right">$${Number(it.monthly || 0).toFixed(2)}</td>
+        <td>${hrs}</td>
+        <td>$${unit}</td>
+        <td>$${mo}</td>
       </tr>`;
-  }).join('');
-  const total = Number(costObj.total_estimate || 0).toFixed(2);
-  const notes = (costObj.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
-  pricingDiv.innerHTML = `
-    <table>
+    })
+    .join("");
+  const notes = (cost.notes || []).map((n) => `<li>${n}</li>`).join("");
+
+  pricingHost.innerHTML = `
+    <table class="table">
       <thead>
         <tr>
           <th>Cloud</th><th>Service</th><th>SKU</th><th>Region</th>
-          <th style="text-align:right">Qty</th><th>Size</th><th>Hours</th>
-          <th style="text-align:right">Unit/Month</th>
-          <th style="text-align:right">Monthly</th>
+          <th>Qty</th><th>Size</th><th>Hours</th><th>Unit/Month</th><th>Monthly</th>
         </tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${rows || `<tr><td colspan="9" class="muted">No items</td></tr>`}</tbody>
       <tfoot>
         <tr>
-          <td colspan="8" style="text-align:right">Total (${costObj.currency || 'USD'})</td>
-          <td style="text-align:right">$${total}</td>
+          <td colspan="8" style="text-align:right"><strong>Total (${currency})</strong></td>
+          <td><strong>$${(cost.total_estimate ?? 0).toFixed(2)}</strong></td>
         </tr>
       </tfoot>
     </table>
-    ${notes ? `<p style="margin-top:8px"><strong>Notes:</strong></p><ul>${notes}</ul>` : ''}
+    ${notes ? `<div class="notes"><strong>Notes:</strong><ul>${notes}</ul></div>` : ""}
   `;
 }
 
-function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-btnSvg.addEventListener('click', () => {
-  if (!lastSvg) return;
-  const blob = new Blob([lastSvg], { type: 'image/svg+xml;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'archgenie-diagram.svg';
-  a.click(); URL.revokeObjectURL(a.href);
-});
-
-btnPng.addEventListener('click', async () => {
-  if (!lastSvg) return;
-  const svgEl = new DOMParser().parseFromString(lastSvg, 'image/svg+xml').documentElement;
-  const svgText = new XMLSerializer().serializeToString(svgEl);
-  const canvas = document.createElement('canvas');
-  const bbox = diagramHost.querySelector('svg')?.getBBox?.();
-  const width = Math.max(1024, (bbox?.width || 1024));
-  const height = Math.max(768, (bbox?.height || 768));
-  canvas.width = width; canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  const img = new Image();
-  img.onload = () => {
-    ctx.drawImage(img, 0, 0);
-    const a = document.createElement('a');
-    a.href = canvas.toDataURL('image/png');
-    a.download = 'archgenie-diagram.png';
-    a.click();
+// --------------------- Actions ---------------------
+async function generateAzure() {
+  setStatus("generating (Azure)...");
+  pricingHost.innerHTML = "";
+  tfOut.value = "";
+  const body = {
+    app_name: $("#appName").value.trim(),
+    prompt: $("#prompt").value.trim(),
+    region: ($("#region").value || "").trim() || undefined,
   };
-  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+  const res = await fetch("/api/mcp/azure/diagram-tf", {
+    method: "POST",
+    headers: headersJSON(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    setStatus("error", false);
+    const t = await res.text();
+    alert("Azure MCP error:\n" + t);
+    return;
+  }
+  const out = await res.json();
+  if (out.diagram && out.diagram.startsWith("graph ")) {
+    renderMermaid(out.diagram);
+  } else if (out.diagram_svg) {
+    renderSvg(out.diagram_svg);
+  } else {
+    diagHost.innerHTML = '<div class="muted">No diagram received.</div>';
+  }
+  tfOut.value = out.terraform || "";
+  if (out.cost) renderPricing(out.cost);
+  setStatus("ready");
+}
+
+async function generateAws() {
+  setStatus("generating (AWS)...");
+  pricingHost.innerHTML = "";
+  tfOut.value = "";
+
+  // Preferred endpoint (diagram + tf + cost). If not present in your backend yet, we fallback to mock.
+  const tryEndpoints = [
+    { url: "/api/mcp/aws/diagram-tf-cost", body: { prompt: $("#prompt").value.trim(), format: "svg" } },
+    { url: "/api/mcp/aws/diagram-tf", body: {} }, // mock (diagram+tf only)
+  ];
+
+  let out = null, ok = false, used = null;
+  for (const ep of tryEndpoints) {
+    const res = await fetch(ep.url, {
+      method: "POST",
+      headers: headersJSON(),
+      body: JSON.stringify(ep.body),
+    }).catch(() => null);
+    if (res && res.ok) {
+      out = await res.json();
+      ok = true;
+      used = ep.url;
+      break;
+    }
+  }
+  if (!ok) {
+    setStatus("error", false);
+    alert("AWS MCP call failed (both /diagram-tf-cost and /diagram-tf). Check proxy/server.");
+    return;
+  }
+
+  if (out.diagram_svg) {
+    renderSvg(out.diagram_svg);
+  } else if (out.diagram && out.diagram.startsWith("graph ")) {
+    renderMermaid(out.diagram); // in case your backend returns Mermaid for AWS
+  } else {
+    diagHost.innerHTML = '<div class="muted">No diagram received.</div>';
+  }
+
+  tfOut.value = out.terraform || "";
+  if (out.cost) renderPricing(out.cost);
+  setStatus(`ready (${used})`);
+}
+
+// --------------------- Downloads / clipboard ---------------------
+$("#btnSvg").addEventListener("click", () => {
+  const svgStr = currentSvgString();
+  if (!svgStr) return alert("No SVG to download yet.");
+  const blob = new Blob([svgStr], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "architecture.svg";
+  a.click();
+  URL.revokeObjectURL(url);
 });
 
-btnCopyTf.addEventListener('click', async () => {
+$("#btnPng").addEventListener("click", async () => {
+  const svgStr = currentSvgString();
+  if (!svgStr) return alert("No SVG to convert yet.");
+
+  // Convert SVG -> PNG via canvas
+  const img = new Image();
+  const svgBlob = new Blob([svgStr], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(svgBlob);
+
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
+    img.src = url;
+  });
+
+  const w = img.naturalWidth || 1600;
+  const h = img.naturalHeight || 900;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0);
+
+  URL.revokeObjectURL(url);
+  canvas.toBlob((blob) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "architecture.png";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, "image/png");
+});
+
+$("#btnCopyTf").addEventListener("click", async () => {
+  const text = tfOut.value || "";
+  if (!text) return;
   try {
-    await navigator.clipboard.writeText(tfOut.value || '');
-    btnCopyTf.textContent = 'Copied!';
-    setTimeout(() => btnCopyTf.textContent = 'Copy', 1000);
-  } catch(e) { console.error(e); }
+    await navigator.clipboard.writeText(text);
+    setStatus("Terraform copied");
+  } catch {
+    setStatus("Copy failed", false);
+  }
 });
 
-btnDlTf.addEventListener('click', () => {
-  const blob = new Blob([tfOut.value || ''], { type: 'text/plain;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'main.tf';
-  a.click(); URL.revokeObjectURL(a.href);
+$("#btnDlTf").addEventListener("click", () => {
+  const text = tfOut.value || "";
+  if (!text) return;
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "main.tf";
+  a.click();
+  URL.revokeObjectURL(url);
 });
 
-el('btnGenerate').addEventListener('click', callAzureMcp);
+// --------------------- Wire buttons ---------------------
+$("#btnGenerate").addEventListener("click", generateAzure);
+$("#btnGenerateAws").addEventListener("click", generateAws);
+
+// Init mermaid
+mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });
+setStatus("ready");

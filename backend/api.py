@@ -1,37 +1,46 @@
 import os
 import re
+import io
 import json
 import time
-import requests
+import base64
+import zipfile
 from typing import List, Dict, Any, Tuple, Optional
+
+import requests
 from fastapi import FastAPI, Depends, Header, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
+from fastapi.responses import StreamingResponse
 
 # =========================
 # Env & Config
 # =========================
-load_dotenv()
-
+# (Same style as your working file)
 CAL_API_KEY = os.getenv("CAL_API_KEY", "super-secret-key")
 
+# Azure OpenAI (used for Azure flow, and for AWS Terraform text-gen)
 AZURE_OPENAI_ENDPOINT    = (os.getenv("AZURE_OPENAI_ENDPOINT", "") or "").rstrip("/")
 AZURE_OPENAI_API_KEY     = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 AZURE_OPENAI_FORCE_JSON  = os.getenv("AZURE_OPENAI_FORCE_JSON", "true").lower() == "true"
 
+# Pricing knobs (Azure dynamic retail; AWS static map for no-account mode)
 USE_LIVE_AZURE_PRICES = os.getenv("USE_LIVE_AZURE_PRICES", "true").lower() == "true"
 HOURS_PER_MONTH = float(os.getenv("HOURS_PER_MONTH", "730"))
 
-# Default region if none provided by user
-DEFAULT_REGION = os.getenv("DEFAULT_REGION", "eastus")
+# Default region if none provided by user (Azure & AWS defaults)
+DEFAULT_REGION         = os.getenv("DEFAULT_REGION", "eastus")       # Azure default
+DEFAULT_REGION_AWS     = os.getenv("DEFAULT_REGION_AWS", "us-east-1")
 
-# App Gateway & Load Balancer defaults
-DEFAULT_APPGW_CAPACITY_UNITS = int(os.getenv("DEFAULT_APPGW_CAPACITY_UNITS", "1"))   # CU per hour
+# Azure component defaults
+DEFAULT_APPGW_CAPACITY_UNITS = int(os.getenv("DEFAULT_APPGW_CAPACITY_UNITS", "1"))
 DEFAULT_SQL_COMPUTE_ONLY     = os.getenv("DEFAULT_SQL_COMPUTE_ONLY", "true").lower() == "true"
-DEFAULT_LB_RULES             = int(os.getenv("DEFAULT_LB_RULES", "2"))               # rules per hour
-DEFAULT_LB_DATA_GB           = float(os.getenv("DEFAULT_LB_DATA_GB", "100"))         # GB processed per month
+DEFAULT_LB_RULES             = int(os.getenv("DEFAULT_LB_RULES", "2"))
+DEFAULT_LB_DATA_GB           = float(os.getenv("DEFAULT_LB_DATA_GB", "100"))
+
+# AWS MCP proxy (run via: npx -y mcp-proxy uvx awslabs.aws-diagram-mcp-server --host 127.0.0.1 --port 3333)
+AWS_DIAGRAM_MCP_HTTP = os.getenv("AWS_DIAGRAM_MCP_HTTP", "http://127.0.0.1:3333")
 
 # =========================
 # Auth
@@ -43,7 +52,7 @@ def require_api_key(x_api_key: str = Header(None)):
 # =========================
 # FastAPI
 # =========================
-app = FastAPI(title="ArchGenie Backend", version="7.6.0")
+app = FastAPI(title="ArchGenie Backend", version="8.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -55,7 +64,7 @@ def health():
     return {"status": "ok", "message": "ArchGenie backend alive"}
 
 # =========================
-# Azure OpenAI (MCP) client
+# Azure OpenAI client
 # =========================
 def _aoai_configured() -> bool:
     return bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY and AZURE_OPENAI_DEPLOYMENT)
@@ -115,13 +124,6 @@ def extract_json_or_fences(content: str) -> Dict[str, Any]:
 # Mermaid sanitizer
 # =========================
 def sanitize_mermaid(src: str) -> str:
-    """
-    - subgraph "Title (region)" (no trailing ';')
-    - Edge lines end with ';', node lines do not
-    - '-. label .->' -> '-. |label| .->'
-    - Insert newline after node ']' or ')' if followed by token (fixes ']SP')
-    - Remove commas inside [] labels
-    """
     if not src:
         return src
     s = src
@@ -129,7 +131,6 @@ def sanitize_mermaid(src: str) -> str:
                r'subgraph "\1 (\2)"', s, flags=re.MULTILINE)
     s = re.sub(r'^(?P<hdr>\s*subgraph\b[^\n;]*?);+\s*$', r'\g<hdr>', s, flags=re.MULTILINE)
     s = re.sub(r'-\.\s+([^.|><\-\n][^.|><\-\n]*?)\s+\.\->', r'-. |\1| .->', s)
-
     out_lines: List[str] = []
     for line in s.splitlines():
         stripped = line.rstrip().strip()
@@ -147,16 +148,14 @@ def sanitize_mermaid(src: str) -> str:
         else:
             out_lines.append(stripped.rstrip(";"))
     s = "\n".join(out_lines)
-
     s = re.sub(r'(\]|\))\s*(?=[A-Za-z0-9_]+\s*(?:-|\.))', r'\1\n', s)
     s = re.sub(r'\[(.*?)\]', lambda m: f"[{m.group(1).replace(',', '')}]", s)
-
     if not s.endswith("\n"):
         s += "\n"
     return s
 
 # =========================
-# Item normalization (ask/diagram/tf -> billable items)
+# Item normalization (Azure only, from your working code)
 # =========================
 def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: Optional[str] = None) -> List[dict]:
     region = region or DEFAULT_REGION
@@ -169,7 +168,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
             d["size_gb"] = float(size_gb)
         items.append(d)
 
-    # Heuristics
+    # Heuristics (Azure)
     if re.search(r"\bapp service\b|\bweb app\b", blob):
         qty = 2 if re.search(r"\bfront.*back|backend.*front", blob) else 1
         add("azure", "app_service", "S1", qty=qty)
@@ -213,7 +212,7 @@ def normalize_to_items(ask: str = "", diagram: str = "", tf: str = "", region: O
     return items
 
 # =========================
-# Azure Retail Prices — helpers
+# Azure Retail Prices — helpers (from your file, kept)
 # =========================
 _price_cache: Dict[str, Tuple[Any, float]] = {}
 
@@ -226,7 +225,6 @@ def cache_get(key: str):
 def cache_put(key: str, value, ttl_sec: int = 3600):
     _price_cache[key] = (value, time.time() + ttl_sec)
 
-# Region variants map (ARM code -> Retail friendly names)
 _REGION_NAME_MAP = {
     "eastus": "US East",
     "eastus2": "US East 2",
@@ -282,21 +280,16 @@ def monthly_from_retail(item: Dict[str, Any]) -> float:
         return round(price * HOURS_PER_MONTH, 2)
     return round(price, 2)
 
-# ---- Robust price resolvers ----
+# ---- Azure price resolvers (kept) ----
 def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
     key = f"az.appservice.{region}.{sku}"
     c = cache_get(key)
     if c is not None:
         return c
-
     service_candidates = [
-        "App Service",
-        "App Service Linux",
-        "Azure App Service",
-        "App Service Plans",
-        "Azure App Service Plans",
+        "App Service", "App Service Linux", "Azure App Service",
+        "App Service Plans", "Azure App Service Plans",
     ]
-
     best_price = None
     for reg in region_variants(region):
         for svc in service_candidates:
@@ -311,14 +304,12 @@ def azure_price_for_app_service_sku(sku: str, region: str) -> Optional[float]:
                     f"and armRegionName eq '{reg}' and retailPrice ne 0"
                 )
                 items = azure_retail_prices_fetch(alt, limit=60)
-
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             pool = hourly or items
             for it in pool:
                 m = monthly_from_retail(it)
                 if best_price is None or (m and m < best_price):
                     best_price = m
-
     if best_price is not None:
         cache_put(key, best_price)
     return best_price
@@ -328,7 +319,6 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
     c = cache_get(key)
     if c is not None:
         return c
-
     best_price = None
     for reg in region_variants(region):
         candidates = [size, size.replace("_", " "), size.replace("v", " v")]
@@ -344,61 +334,48 @@ def azure_price_for_vm_size(size: str, region: str) -> Optional[float]:
                 m = monthly_from_retail(it)
                 if best_price is None or (m and m < best_price):
                     best_price = m
-
     if best_price is not None:
         cache_put(key, best_price)
     return best_price
 
 def azure_price_for_sql(sku: str, region: str) -> Optional[float]:
-    """
-    Resolve SQL Database Single DB (e.g., S0/S1/vCore) to a realistic monthly *compute* price.
-    Prefer hourly DTU/vCore/Compute meters; skip backup/storage/IO meters.
-    """
     key = f"az.sql.{region}.{sku}"
     c = cache_get(key)
     if c is not None:
         return c
-
     best_price = None
     bad_words = ["backup", "storage", "io", "data processed", "per gb", "gb-month"]
     good_words = ["dtu", "vcore", "compute"]
-
     def is_compute_meter(it):
         meter = (it.get("meterName") or "").lower()
         if any(b in meter for b in bad_words):
             return False
         return any(g in meter for g in good_words) or sku.lower() in meter
-
     for reg in region_variants(region):
         flt1 = (
             f"serviceName eq 'SQL Database' and skuName eq '{sku}' "
             f"and armRegionName eq '{reg}' and retailPrice ne 0"
         )
         items = azure_retail_prices_fetch(flt1, limit=200)
-
         if not items:
             flt2 = (
                 f"contains(productName, 'SQL Database') and skuName eq '{sku}' "
                 f"and armRegionName eq '{reg}' and retailPrice ne 0"
             )
             items = azure_retail_prices_fetch(flt2, limit=200)
-
         if not items:
             flt3 = (
                 f"serviceName eq 'SQL Database' and contains(meterName, '{sku}') "
                 f"and armRegionName eq '{reg}' and retailPrice ne 0"
             )
             items = azure_retail_prices_fetch(flt3, limit=200)
-
         hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
         pool = hourly or items
         pool = [x for x in pool if is_compute_meter(x)] if DEFAULT_SQL_COMPUTE_ONLY else pool
-
         for it in pool:
             m = monthly_from_retail(it)
             if best_price is None or (m and m < best_price):
                 best_price = m
-
     if best_price is not None:
         cache_put(key, best_price)
     return best_price
@@ -424,57 +401,36 @@ def azure_price_for_storage_lrs_per_gb(region: str) -> Optional[float]:
     return best
 
 def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
-    """
-    Resolve Standard Load Balancer component prices for a region.
-    Returns:
-      {
-        "rule_hour_monthly": $/rule/month   (from hourly "Rule" meters),
-        "data_gb_monthly":   $/GB/month     (from "Data Processed" meters)
-      }
-    """
     key = f"az.lb.standard.components.{region}"
     cached = cache_get(key)
     if cached:
         return cached
-
     best_rule = None
     best_data = None
-
     def is_rule_meter(it):
         meter = (it.get("meterName") or "").lower()
         uom = (it.get("unitOfMeasure") or "").lower()
         return "rule" in meter and "hour" in uom
-
     def is_data_meter(it):
         meter = (it.get("meterName") or "").lower()
         uom = (it.get("unitOfMeasure") or "").lower()
         return ("data" in meter or "processed" in meter or "data path" in meter) and ("gb" in uom)
-
     for reg in region_variants(region):
-        flt = (
-            f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' "
-            f"and retailPrice ne 0"
-        )
+        flt = f"serviceName eq 'Load Balancer' and armRegionName eq '{reg}' and retailPrice ne 0"
         items = azure_retail_prices_fetch(flt, limit=200)
-
         hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
         for it in hourly:
             if is_rule_meter(it):
                 m = monthly_from_retail(it)
                 if best_rule is None or (m and m < best_rule):
                     best_rule = m
-
         for it in items:
             if is_data_meter(it):
-                m = monthly_from_retail(it)  # per GB-month
+                m = monthly_from_retail(it)
                 if best_data is None or (m and m < best_data):
                     best_data = m
-
         if best_rule is None or best_data is None:
-            alt = (
-                f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' "
-                f"and retailPrice ne 0"
-            )
+            alt = f"contains(productName, 'Load Balancer') and armRegionName eq '{reg}' and retailPrice ne 0"
             items = azure_retail_prices_fetch(alt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
@@ -487,10 +443,8 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
                     m = monthly_from_retail(it)
                     if best_data is None or (m and m < best_data):
                         best_data = m
-
     if best_rule is None and best_data is None:
         return None
-
     comps = {
         "rule_hour_monthly": round(best_rule or 0.0, 4),
         "data_gb_monthly": round(best_data or 0.0, 4),
@@ -499,35 +453,24 @@ def azure_price_for_lb_components(region: str) -> Optional[Dict[str, float]]:
     return comps
 
 def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, float]]:
-    """
-    Return {'base_monthly': ..., 'capacity_unit_monthly': ...} for App Gateway WAF_v2 in a region.
-    Prefer hourly meters; choose cheapest matching row for each component.
-    """
     key = f"az.appgw.wafv2.components.{region}"
     cached = cache_get(key)
     if cached:
         return cached
-
     best_base = None
     best_cu = None
-
     def is_base(it):
         meter = (it.get("meterName") or "").lower()
         uom = (it.get("unitOfMeasure") or "").lower()
         if "gb" in uom:
             return False
         return ("gateway" in meter or "waf v2" in meter or "app gateway" in meter) and "capacity" not in meter
-
     def is_cu(it):
         meter = (it.get("meterName") or "").lower()
         uom = (it.get("unitOfMeasure") or "").lower()
         return "capacity unit" in meter and "hour" in uom
-
     for reg in region_variants(region):
-        flt = (
-            f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' "
-            f"and retailPrice ne 0"
-        )
+        flt = f"serviceName eq 'Application Gateway' and armRegionName eq '{reg}' and retailPrice ne 0"
         items = azure_retail_prices_fetch(flt, limit=200)
         hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
         for it in hourly:
@@ -538,12 +481,8 @@ def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, fl
             elif is_cu(it):
                 if best_cu is None or (m and m < best_cu):
                     best_cu = m
-
         if best_base is None or best_cu is None:
-            alt = (
-                f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' "
-                f"and retailPrice ne 0"
-            )
+            alt = f"contains(productName, 'Application Gateway') and armRegionName eq '{reg}' and retailPrice ne 0"
             items = azure_retail_prices_fetch(alt, limit=200)
             hourly = [x for x in items if "hour" in (x.get("unitOfMeasure","").lower())]
             for it in hourly:
@@ -554,10 +493,8 @@ def azure_price_for_appgw_wafv2_components(region: str) -> Optional[Dict[str, fl
                 elif is_cu(it):
                     if best_cu is None or (m and m < best_cu):
                         best_cu = m
-
     if best_base is None and best_cu is None:
         return None
-
     components = {
         "base_monthly": round(best_base or 0.0, 2),
         "capacity_unit_monthly": round(best_cu or 0.0, 2),
@@ -603,7 +540,7 @@ def azure_price_for_log_analytics(region: str) -> Optional[float]:
     return best
 
 # =========================
-# Pricing Engine
+# Azure Pricing Engine (kept)
 # =========================
 def price_items(items: List[dict]) -> dict:
     currency = "USD"
@@ -673,7 +610,6 @@ def price_items(items: List[dict]) -> dict:
         monthly = float(unit_monthly)
         if hours and hours != HOURS_PER_MONTH and monthly > 0:
             monthly = monthly * (hours / HOURS_PER_MONTH)
-
         monthly = round(monthly * qty, 2)
         total += monthly
 
@@ -701,13 +637,128 @@ def price_items(items: List[dict]) -> dict:
     }
 
 # =========================
-# Public Endpoints
+# ---- AWS (no-account) helpers: normalize + static pricing ----
+# =========================
+def normalize_aws_items(ask: str = "", diagram_hint: str = "", tf: str = "", region: Optional[str] = None) -> List[dict]:
+    """Very small heuristic normalizer for common AWS 3-tier phrasing."""
+    region = region or DEFAULT_REGION_AWS
+    items: List[dict] = []
+    blob = f"{ask}\n{diagram_hint}\n{tf}".lower()
+
+    def add(service, sku, qty=1, size_gb=None, hours=None, extra=None):
+        d = {"cloud": "aws", "service": service, "sku": sku, "qty": max(1, int(qty)), "region": region}
+        if size_gb is not None: d["size_gb"] = float(size_gb)
+        if hours is not None: d["hours"] = float(hours)
+        if extra:
+            d.update(extra)
+        items.append(d)
+
+    # EC2
+    m = re.search(r"\bec2\b.*\b([ctmr]\d\.\w+)\b", blob)
+    itype = m.group(1) if m else "t3.micro"
+    if "ec2" in blob or "autoscaling" in blob or "asg" in blob:
+        qty = 2 if ("asg" in blob or "auto scaling" in blob) else 1
+        add("ec2", itype, qty=qty)
+
+    # ALB / NLB
+    if "alb" in blob or "application load balancer" in blob:
+        # default: 20 LCU (very rough), 100 GB data processed
+        add("alb", "LCU", qty=1, extra={"lcu": float(os.getenv("AWS_DEFAULT_ALB_LCU", "20")), "data_gb": 100.0})
+    elif "nlb" in blob or "network load balancer" in blob or "elb" in blob:
+        add("nlb", "LCU", qty=1, extra={"lcu": 10.0, "data_gb": 100.0})
+
+    # RDS
+    if "rds" in blob or "aurora" in blob or "mysql" in blob or "postgres" in blob:
+        # pick a small common class if not specified
+        m2 = re.search(r"\bdb\.[a-z0-9.]+\b", blob)
+        rds_class = m2.group(0) if m2 else "db.t3.micro"
+        add("rds", rds_class, qty=1)
+
+    # S3
+    if "s3" in blob:
+        # rough 100 GB
+        add("s3", "standard", qty=1, size_gb=100.0)
+
+    return items
+
+def aws_static_monthly(service: str, sku: str, region: str, item: dict) -> Optional[float]:
+    """
+    Static fallback (no AWS account public API). Replace with AWS Pricing API when creds available.
+    These are rough ballparks for us-east-1; tweak as needed.
+    """
+    service = service.lower()
+    sku = sku.lower()
+    # ballpark monthly (on-demand, Linux) for common tiny shapes
+    EC2_MAP = {
+        "t3.micro": 8.5, "t3.small": 16.0, "t3.medium": 32.0,
+        "t4g.micro": 7.0, "t4g.small": 14.0,
+        "m5.large": 70.0, "c6i.large": 65.0,
+    }
+    RDS_MAP = {
+        "db.t3.micro": 17.0, "db.t4g.micro": 15.0, "db.t3.small": 34.0,
+        "db.m5.large": 300.0
+    }
+    S3_PER_GB = 0.023  # us-east-1 standard
+    ALB_BASE  = 18.0   # per ALB-month
+    ALB_LCU   = 0.008  # per LCU-hour -> 0.008*730=~5.84; we’ll multiply LCUs*hourly*730
+    DATA_GB   = 0.008  # (very rough) per GB processed through ALB/NLB
+
+    if service == "ec2":
+        return EC2_MAP.get(sku, 30.0)  # default micro-ish
+    if service == "rds":
+        return RDS_MAP.get(sku, 25.0)
+    if service == "s3":
+        size = float(item.get("size_gb") or 100.0)
+        return round(size * S3_PER_GB, 2)
+    if service in ("alb", "nlb"):
+        lcu = float(item.get("lcu") or 10.0)
+        gb  = float(item.get("data_gb") or 100.0)
+        lcu_month = lcu * (ALB_LCU * HOURS_PER_MONTH)
+        return round(ALB_BASE + lcu_month + gb * DATA_GB, 2)
+    return None
+
+def price_items_aws(items: List[dict]) -> dict:
+    currency = "USD"
+    notes: List[str] = ["AWS prices are static fallbacks (no account mode). Replace with AWS Pricing API for accuracy."]
+    total = 0.0
+    out_items = []
+    for it in items:
+        if it.get("cloud") != "aws":
+            continue
+        unit = aws_static_monthly(it["service"], it["sku"], it.get("region", DEFAULT_REGION_AWS), it) or 0.0
+        qty = int(it.get("qty", 1) or 1)
+        monthly = round(unit * qty, 2)
+        total += monthly
+        line = {
+            "cloud": "aws",
+            "service": it["service"],
+            "sku": it["sku"],
+            "qty": qty,
+            "region": it.get("region", DEFAULT_REGION_AWS),
+            "size_gb": it.get("size_gb"),
+            "unit_monthly": round(unit, 2),
+            "monthly": monthly
+        }
+        if it["service"] in ("alb", "nlb"):
+            line["lcu"] = it.get("lcu")
+            line["data_gb"] = it.get("data_gb")
+        out_items.append(line)
+    return {
+        "currency": currency,
+        "total_estimate": round(total, 2),
+        "method": "aws-static-fallback",
+        "notes": notes,
+        "items": out_items
+    }
+
+# =========================
+# Public Endpoints — Azure (unchanged behavior)
 # =========================
 @app.post("/mcp/azure/diagram-tf")
 def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     """
     Generate Azure architecture (diagram + Terraform) via Azure MCP (AOAI).
-    Strict: no local fallback. Returns sanitized diagram, terraform, and pricing.
+    Then price using Azure Retail Prices API (public, no account).
     """
     if not _aoai_configured():
         raise HTTPException(status_code=500, detail="Azure OpenAI not configured")
@@ -736,7 +787,6 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ])
-
     try:
         content = result["choices"][0]["message"]["content"]
     except Exception:
@@ -746,12 +796,10 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
     diagram_raw = (parsed.get("diagram") or "").strip()
     tf_raw      = (parsed.get("terraform") or "").strip()
 
-    if not diagram_raw:
-        raise HTTPException(status_code=502, detail=f"Model did not return 'diagram'. Content: {content[:500]}")
-    if not diagram_raw.lower().startswith("graph "):
-        raise HTTPException(status_code=502, detail=f"'diagram' must start with 'graph'. Got: {diagram_raw[:120]}")
+    if not diagram_raw or not diagram_raw.lower().startswith("graph "):
+        raise HTTPException(status_code=502, detail="Model did not return a valid Mermaid graph")
     if not tf_raw:
-        raise HTTPException(status_code=502, detail=f"Model did not return 'terraform'. Content: {content[:500]}")
+        raise HTTPException(status_code=502, detail="Model did not return Terraform")
 
     diagram = sanitize_mermaid(diagram_raw)
     tf      = strip_fences(tf_raw)
@@ -761,49 +809,120 @@ def azure_mcp(payload: dict = Body(...), _=Depends(require_api_key)):
 
     return {"diagram": diagram, "terraform": tf, "cost": estimate_obj}
 
-# ----------------- AWS / GCP Mocks (no pricing) -----------------
-@app.get("/mcp/aws/diagram-tf")
-def aws_mock(_=Depends(require_api_key)):
-    return {
-        "diagram": """graph TD
-  subgraph AWS
-    A[ALB] --> B[EC2: web-1];
-    B --> C[RDS: archgenie-db];
-    B --> D[S3: assets];
-  end
-""",
-        "terraform": """# mock demo
-resource "aws_instance" "web" {
-  ami           = "ami-123456"
-  instance_type = "t3.micro"
-}
+# =========================
+# AWS Diagram MCP + TF + Cost
+# =========================
+def mcp_tools_call(tool_name: str, arguments: dict) -> dict:
+    """
+    Call MCP proxy's /mcp endpoint (streamable HTTP transport).
+    """
+    url = AWS_DIAGRAM_MCP_HTTP.rstrip("/") + "/mcp"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=180)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"MCP bridge unreachable: {e}")
+    if r.status_code >= 300:
+        raise HTTPException(status_code=502, detail=f"MCP HTTP {r.status_code}: {r.text}")
+    resp = r.json()
+    if "error" in resp:
+        raise HTTPException(status_code=502, detail=f"MCP error: {resp['error']}")
+    return resp.get("result") or {}
 
-resource "aws_s3_bucket" "assets" {
-  bucket = "archgenie-assets"
-}
-"""
+@app.post("/mcp/aws/diagram-tf-cost")
+def aws_mcp_full(payload: dict = Body(...), _=Depends(require_api_key)):
+    """
+    Generate an AWS diagram (SVG) via AWS Diagram MCP,
+    Generate AWS Terraform via AOAI,
+    Return cost estimate (static map fallback).
+    """
+    prompt = (payload.get("prompt") or "").strip() or \
+        "Three-tier web app: ALB -> EC2 Auto Scaling Group -> RDS (Multi-AZ); VPC with public/private subnets in 2 AZs; NAT."
+    region = payload.get("region") or DEFAULT_REGION_AWS
+    fmt = (payload.get("format") or "svg").lower()
+
+    # 1) Ask AWS Diagram MCP for an image
+    result = mcp_tools_call("generate_diagram", {
+        "prompt": prompt,
+        "format": fmt,
+        "style": {"theme": "light"}
+    })
+    image = result.get("image")
+    mime  = (result.get("mime") or "").lower()
+
+    diagram_svg = None
+    if fmt == "svg":
+        if isinstance(image, str) and image.lstrip().startswith("<svg"):
+            diagram_svg = image
+        else:
+            try:
+                diagram_svg = base64.b64decode(image).decode("utf-8")
+            except Exception:
+                raise HTTPException(status_code=500, detail="Could not decode SVG from MCP")
+    else:
+        # PNG not used in UI today; still return if needed
+        pass
+
+    # 2) Use AOAI to synthesize AWS Terraform from the same prompt
+    if not _aoai_configured():
+        raise HTTPException(status_code=500, detail="Azure OpenAI not configured for Terraform synthesis")
+    system_tf = (
+        "You are an expert cloud IaC generator. Emit ONLY Terraform HCL for AWS "
+        "(VPC, public/private subnets across 2 AZs, NAT, ALB, Auto Scaling Group, EC2 launch template, "
+        "security groups, RDS with Multi-AZ if requested, S3 if requested). No comments. No backticks."
+    )
+    user_tf = f"Prompt:\n{prompt}\nRegion: {region}\nOutput: Terraform HCL only."
+    tf_resp = aoai_chat([
+        {"role": "system", "content": system_tf},
+        {"role": "user", "content": user_tf},
+    ], temperature=0.1)
+    try:
+        tf_content = tf_resp["choices"][0]["message"]["content"]
+    except Exception:
+        tf_content = ""
+    terraform = strip_fences(tf_content or "")
+
+    # 3) Normalize a minimal set of AWS items and price (static)
+    items_aws = normalize_aws_items(ask=prompt, diagram_hint="aws diagram", tf=terraform, region=region)
+    aws_cost  = price_items_aws(items_aws)
+
+    return {
+        "diagram_svg": diagram_svg,
+        "terraform": terraform,
+        "cost": aws_cost,
+        "prompt_used": prompt,
+        "region": region
     }
 
-@app.get("/mcp/gcp/diagram-tf")
-def gcp_mock(_=Depends(require_api_key)):
-    return {
-        "diagram": """graph TD
-  subgraph GCP
-    A[Load Balancer] --> B[Compute Engine: web-1];
-    B --> C[Cloud SQL: archgenie-db];
-    B --> D[Cloud Storage: assets];
-  end
-""",
-        "terraform": """# mock demo
-resource "google_compute_instance" "web" {
-  name         = "web-1"
-  machine_type = "e2-micro"
-  zone         = "us-central1-a"
-}
+# =========================
+# Bundle ZIP (diagram + tf + svg/png)
+# =========================
+@app.post("/bundle")
+def bundle_zip(payload: dict = Body(...), _=Depends(require_api_key)):
+    """
+    Payload: { diagram?: str, terraform?: str, image_svg?: str, image_png_b64?: str }
+    Returns a zip: diagram.mmd or diagram.svg/png + main.tf
+    """
+    diagram = (payload.get("diagram") or "").strip()
+    tf      = (payload.get("terraform") or "").strip()
+    svg     = (payload.get("image_svg") or "").strip()
+    png_b64 = (payload.get("image_png_b64") or "").strip()
 
-resource "google_storage_bucket" "assets" {
-  name     = "archgenie-assets"
-  location = "US"
-}
-"""
-    }
+    if not (diagram or svg or png_b64 or tf):
+        raise HTTPException(status_code=400, detail="Nothing to bundle")
+
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as z:
+        if diagram: z.writestr("diagram.mmd", diagram)
+        if svg:     z.writestr("diagram.svg", svg)
+        if png_b64: z.writestr("diagram.png", base64.b64decode(png_b64))
+        if tf:      z.writestr("main.tf", tf)
+        z.writestr("README.txt", "ArchGenie bundle\n")
+    bio.seek(0)
+    headers = {"Content-Disposition": "attachment; filename=archgenie-bundle.zip"}
+    return StreamingResponse(bio, media_type="application/zip", headers=headers)
