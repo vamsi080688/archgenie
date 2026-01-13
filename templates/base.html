@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ArchGenie</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Pico.css for quick clean styling -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@picocss/pico@1.5.10/css/pico.min.css"
+    />
+    <!-- Mermaid -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+    </script>
+    <style>
+      .chat-box {
+        max-height: 50vh;
+        overflow-y: auto;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1rem;
+        background: #fff;
+      }
+      .msg-user {
+        background: #e6f3ff;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.75rem;
+        margin: 0.25rem 0;
+      }
+      .msg-assistant {
+        background: #f6f6f6;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.75rem;
+        margin: 0.25rem 0;
+      }
+      .diagram-container {
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1rem;
+        overflow: auto;
+      }
+      pre {
+        white-space: pre-wrap;
+      }
+      .code-list {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">{% block content %}{% endblock %}</main>
+  </body>
+</html>
